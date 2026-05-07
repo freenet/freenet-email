@@ -1991,10 +1991,7 @@ pub(crate) mod permission_pump {
     /// function does not exist (the caller is also `#[cfg(…)]`).
     pub(crate) fn spawn(user: dioxus::prelude::Signal<crate::app::User>) {
         let Some(origin) = gateway_origin() else {
-            crate::log::error(
-                "permission pump: could not derive gateway origin".into(),
-                None,
-            );
+            crate::log::error("permission pump: could not derive gateway origin", None);
             return;
         };
         dioxus::core::spawn_forever(async move {

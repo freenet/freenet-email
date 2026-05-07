@@ -779,6 +779,7 @@ pub(crate) async fn node_comms(
         user: Signal<crate::app::User>,
         mut login_controller: Signal<crate::app::LoginController>,
         inboxes: &InboxesData,
+        mut ab_gen: crate::app::AddressBookGen,
     ) {
         let mut client = api.sender_half();
         match req {
@@ -1327,8 +1328,8 @@ pub(crate) async fn node_comms(
                 let found = inbox_management::CREATED_INBOX.with(|keys| {
                     let pos = keys.borrow().iter().position(|(_, k)| k == &contract_key);
                     if let Some(pos) = pos {
-                        let (alias, key) = keys.borrow_mut().remove(pos);
-                        crate::log::debug!("inbox contract `{key}` for alias `{alias}` put");
+                        let (_alias, _key) = keys.borrow_mut().remove(pos);
+                        crate::log::debug!("inbox contract `{_key}` for alias `{_alias}` put");
                         return true;
                     }
                     false
@@ -1361,8 +1362,8 @@ pub(crate) async fn node_comms(
                 let found = token_record_management::CREATED_AFT_RECORD.with(|keys| {
                     let pos = keys.borrow().iter().position(|(_, k)| k == &contract_key);
                     if let Some(pos) = pos {
-                        let (alias, key) = keys.borrow_mut().remove(pos);
-                        crate::log::debug!("AFT record `{key}` for alias `{alias}` put");
+                        let (_alias, _key) = keys.borrow_mut().remove(pos);
+                        crate::log::debug!("AFT record `{_key}` for alias `{_alias}` put");
                         return true;
                     }
                     false
@@ -1411,8 +1412,8 @@ pub(crate) async fn node_comms(
                     let found = token_generator_management::CREATED_AFT_GEN.with(|keys| {
                         let pos = keys.borrow().iter().position(|(_, k)| k == &key);
                         if let Some(pos) = pos {
-                            let (alias, key) = keys.borrow_mut().remove(pos);
-                            crate::log::debug!("AFT gen delegate `{key}` for `{alias}` put");
+                            let (_alias, _key) = keys.borrow_mut().remove(pos);
+                            crate::log::debug!("AFT gen delegate `{_key}` for `{_alias}` put");
                             return true;
                         }
                         false
@@ -1656,6 +1657,7 @@ pub(crate) async fn node_comms(
                     user,
                     login_controller,
                     &inboxes,
+                    ab_gen,
                 )
                 .await;
             }

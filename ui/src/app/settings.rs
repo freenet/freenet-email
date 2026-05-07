@@ -776,16 +776,20 @@ fn ScrAft() -> Element {
             }
             Card {
                 title: "Token max age (days)",
-                sub: "Sender's AFT delegate uses this when picking a free slot. Capped at 730 days by the AFT crate; lower values rotate the cap faster.",
-                div { class: "field",
-                    input {
-                        class: "input",
-                        r#type: "number",
-                        min: "1",
-                        max: "730",
-                        value: "{max_age_days}",
-                        onchange: on_max_age,
-                    }
+                SettingRow {
+                    label: "Token max age",
+                    help: "Sender's AFT delegate uses this when picking a free slot. Capped at 730 days by the AFT crate; lower values rotate the cap faster.",
+                    control: rsx! {
+                        input {
+                            class: "fm-input",
+                            r#type: "number",
+                            min: "1",
+                            max: "730",
+                            value: "{max_age_days}",
+                            style: "width: 100px",
+                            onchange: on_max_age,
+                        }
+                    },
                 }
             }
             Card {

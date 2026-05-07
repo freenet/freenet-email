@@ -1057,6 +1057,13 @@ fn UserInbox() -> Element {
     // login flow also provides this; we re-provide here so Settings can
     // be opened from inside the inbox without the login pane in scope.
     use_context_provider(|| Signal::new(crate::app::login::ImportBackup(false)));
+    // ScrContacts (Settings → Contacts) reads these three signals to drive
+    // its Import / Share buttons. Login pane also provides them; re-provide
+    // here so opening Settings → Contacts from the sidebar (#131) doesn't
+    // panic with "Could not find context".
+    use_context_provider(|| Signal::new(crate::app::login::ImportContact(false)));
+    use_context_provider(|| Signal::new(crate::app::login::ShareContact(false)));
+    use_context_provider(|| Signal::new(crate::app::login::SharePending::default()));
 
     let menu_selection = use_context::<Signal<menu::MenuSelection>>();
     let settings_open = menu_selection.read().settings().is_some();

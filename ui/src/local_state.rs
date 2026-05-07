@@ -789,4 +789,80 @@ mod tests {
             "deleted message must not be re-merged as kept on stale echo",
         );
     }
+
+    /// Regression for #137 / #141: `kept` is a `HashMap`, so iteration order
+    /// is non-deterministic. After sorting the `kept_for` output with the same
+    /// `(kept_at, id)` comparator used in the inbox rebuild, the result must
+    /// be identical regardless of HashMap insertion order.
+    ///
+    /// This test builds a synthetic AliasState with 6 messages all sharing
+    /// the same `kept_at` timestamp (forcing the tie-break to decide the final
+    /// order), then re-inserts them in 10 different permutations and asserts
+    /// that `sorted(kept_for(...))` is the same every time.
+    #[test]
+    fn kept_for_sort_is_stable_across_hashmap_insertion_orders() {
+        const SHARED_KEPT_AT: i64 = 1_000_000;
+
+        // Build a batch of (id, KeptMessage) with identical kept_at so the
+        // tie-break by id is what determines order.
+        let make_batch = |order: &[MessageId]| {
+            let mut state = LocalState::default();
+            let entry = state.aliases_mut().entry("alice".to_string()).or_default();
+            for &id in order {
+                entry.kept.insert(
+                    id.to_string(),
+                    KeptMessage {
+                        from: "bob".into(),
+                        title: format!("msg-{id}"),
+                        content: "body".into(),
+                        kept_at: SHARED_KEPT_AT,
+                    },
+                );
+            }
+            state
+        };
+
+        // Sort helper: mirrors the sort_cmp_inbox tie-break logic of (time desc, id desc).
+        let sort_entries = |mut v: Vec<(MessageId, KeptMessage)>| -> Vec<MessageId> {
+            v.sort_by(|(a_id, a_k), (b_id, b_k)| {
+                b_k.kept_at.cmp(&a_k.kept_at).then(b_id.cmp(a_id))
+            });
+            v.into_iter().map(|(id, _)| id).collect()
+        };
+
+        // 10 insertion orders (hand-enumerated permutations of the 6-element vec).
+        let permutations: &[&[MessageId]] = &[
+            &[3, 1, 5, 2, 4, 6],
+            &[6, 4, 2, 5, 1, 3],
+            &[1, 2, 3, 4, 5, 6],
+            &[6, 5, 4, 3, 2, 1],
+            &[2, 4, 6, 1, 3, 5],
+            &[5, 3, 1, 6, 4, 2],
+            &[1, 6, 2, 5, 3, 4],
+            &[4, 2, 6, 3, 5, 1],
+            &[3, 5, 1, 4, 2, 6],
+            &[6, 1, 4, 2, 5, 3],
+        ];
+
+        let mut results: Vec<Vec<MessageId>> = Vec::with_capacity(permutations.len());
+        for &perm in permutations {
+            let snapshot = make_batch(perm);
+            replace_snapshot(snapshot);
+            let entries = kept_for("alice");
+            results.push(sort_entries(entries));
+        }
+
+        // Every permutation must produce the same sorted order.
+        let expected = results[0].clone();
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                *result, expected,
+                "permutation {i} produced a different sort order: {result:?} vs {expected:?}",
+            );
+        }
+
+        // Sanity: expected order is ids descending (6,5,4,3,2,1) because
+        // kept_at is identical for all and we tie-break by id descending.
+        assert_eq!(expected, vec![6, 5, 4, 3, 2, 1]);
+    }
 }

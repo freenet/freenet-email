@@ -688,8 +688,16 @@ impl Message {
 // re-render (issue #137).  Use these at every sort site AND in unit tests so
 // the two cannot drift apart.
 
-/// Inbox: newest `Message` first; tie-break by `id` descending (monotonic u64
-/// — higher id = later arrival).
+/// Inbox: newest `Message` first; tie-break by `id` descending for stability.
+///
+/// **Important:** `Message.id` is the *enumerate index* from
+/// `InboxModel::from_state` (i.e. the position of the row in the contract's
+/// `StoredInbox.messages` vec at the time the model was built).  It is NOT a
+/// monotonic arrival id — a higher value does NOT mean the message arrived
+/// later.  The tie-break is purely for render-stability: it guarantees a
+/// consistent ordering across re-renders when two messages share the same
+/// sender-stamped timestamp, preventing the HashMap iteration-order flicker
+/// described in issue #137.
 fn sort_cmp_inbox(a: &Message, b: &Message) -> std::cmp::Ordering {
     b.time.cmp(&a.time).then(b.id.cmp(&a.id))
 }
@@ -712,8 +720,10 @@ fn sort_cmp_sent(
     b.1.sent_at.cmp(&a.1.sent_at).then(b.0.cmp(&a.0))
 }
 
-/// Archive: newest first by `archived_at`; tie-break by `id` descending
-/// (monotonic u64 — higher id = later arrival).
+/// Archive: newest first by `archived_at`; tie-break by `id` descending for
+/// stability.  The `id` key is the stringified `MessageId` used in the
+/// archived map — its ordering is for render-stability only, not chronological
+/// arrival.
 fn sort_cmp_archive(
     a: &(u64, mail_local_state::ArchivedMessage),
     b: &(u64, mail_local_state::ArchivedMessage),
@@ -2753,8 +2763,10 @@ mod inbox_sort_tests {
         assert_eq!(ids, vec![2, 3, 1]);
     }
 
-    /// When timestamps tie, higher id should come first (deterministic
-    /// tie-break — fixes the HashMap reorder on click, issue #137).
+    /// When timestamps tie, higher id should come first for render-stability
+    /// (issue #137).  Note: `id` is the enumerate index from `from_state`,
+    /// not a monotonic arrival counter — this tie-break is for stability
+    /// only, not chronological ordering.
     #[test]
     fn tie_break_by_id_desc() {
         let ts = 5_000;

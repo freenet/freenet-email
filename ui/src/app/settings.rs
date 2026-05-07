@@ -724,7 +724,13 @@ fn ScrAft() -> Element {
                             max: "730",
                             value: "{max_age_days}",
                             style: "width: 100px",
-                            oninput: on_max_age,
+                            // Use onchange (not oninput) so persist_identity_settings and
+                            // push_policy (which dispatches a signed ML-DSA inbox-state UPDATE
+                            // over WebSocket) fire only when the user commits the value —
+                            // e.g. pressing Enter or blurring the field — not on every
+                            // keystroke. Typing "365" must not send three signed contract
+                            // updates for 3, 36, 365.
+                            onchange: on_max_age,
                         }
                     },
                 }

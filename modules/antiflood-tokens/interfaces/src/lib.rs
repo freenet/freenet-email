@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Display;
 
@@ -94,9 +95,7 @@ pub trait TokenAllocation: DeserializeOwned {
     fn get_criteria(&self) -> AllocationCriteria;
 }
 
-#[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Display, PartialOrd, Ord,
-)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Display)]
 #[strum(serialize_all = "lowercase")]
 #[repr(u8)]
 pub enum Tier {
@@ -115,6 +114,25 @@ pub enum Tier {
     Day90,
     Day180,
     Day365,
+}
+
+/// Ordering is by slot duration: cheaper (shorter-period) tiers sort lower.
+/// `Min1 < Min5 < … < Day365`.
+///
+/// This explicit impl replaces the former `#[derive(Ord)]` so that future
+/// contributors reordering variant declarations don't silently break cost
+/// ranking — the ordering is now semantic-bound to `tier_duration()`, not
+/// to declaration order.
+impl Ord for Tier {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.tier_duration().cmp(&other.tier_duration())
+    }
+}
+
+impl PartialOrd for Tier {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Tier {
@@ -958,6 +976,68 @@ mod tier_tests {
         assert_eq!(day15_normalized, get_date(2023, 1, 30));
         let day15_normalized = day15_tier.normalize_to_next(get_date(2023, 1, 31));
         assert_eq!(day15_normalized, get_date(2023, 2, 14));
+    }
+
+    /// All 15 `Tier` variants must sort in strict ascending slot-duration
+    /// order, i.e. cheaper (shorter-period) tiers are smaller.
+    ///
+    /// This test is the guard that makes the explicit `Ord` impl meaningful:
+    /// if a future contributor adds a variant or changes `tier_duration()`,
+    /// this test will catch any ordering regression before it ships.
+    #[test]
+    fn tier_ord_follows_slot_duration() {
+        // List every variant in the expected cheapest-first order.
+        let expected_order = [
+            Tier::Min1,
+            Tier::Min5,
+            Tier::Min10,
+            Tier::Min30,
+            Tier::Hour1,
+            Tier::Hour3,
+            Tier::Hour6,
+            Tier::Hour12,
+            Tier::Day1,
+            Tier::Day7,
+            Tier::Day15,
+            Tier::Day30,
+            Tier::Day90,
+            Tier::Day180,
+            Tier::Day365,
+        ];
+
+        // Verify strictly ascending: each tier must be strictly less than the next.
+        for window in expected_order.windows(2) {
+            let (a, b) = (window[0], window[1]);
+            assert!(
+                a < b,
+                "expected {a:?} < {b:?} by slot duration, but ordering was {:?}",
+                a.cmp(&b)
+            );
+        }
+
+        // Verify that sorting a shuffled copy produces the expected order.
+        let mut shuffled = [
+            Tier::Day365,
+            Tier::Min10,
+            Tier::Hour12,
+            Tier::Day1,
+            Tier::Min1,
+            Tier::Day30,
+            Tier::Hour3,
+            Tier::Day7,
+            Tier::Min30,
+            Tier::Day90,
+            Tier::Hour6,
+            Tier::Day15,
+            Tier::Hour1,
+            Tier::Day180,
+            Tier::Min5,
+        ];
+        shuffled.sort();
+        assert_eq!(
+            shuffled, expected_order,
+            "sorted Tier array must match expected cheapest-first order"
+        );
     }
 }
 

@@ -192,7 +192,12 @@ test.describe("Compose To-field autocomplete (#132)", () => {
 });
 
 test.describe("Compose autocomplete — touch long-press (Pixel 5)", () => {
-  test.use({ ...require("@playwright/test").devices["Pixel 5"] });
+  // Spread the Pixel 5 device profile but omit `defaultBrowserType` —
+  // Playwright forbids that property inside a describe block (it forces a
+  // new worker and must live at the project level in the config instead).
+  const { defaultBrowserType: _unused, ...pixel5 } =
+    require("@playwright/test").devices["Pixel 5"];
+  test.use({ ...pixel5 });
 
   test.beforeEach(async ({ page }) => {
     await page.goto("/");

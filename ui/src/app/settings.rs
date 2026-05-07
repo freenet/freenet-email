@@ -741,6 +741,45 @@ fn ScrAft() -> Element {
         local_state::persist_identity_settings(alias_key_rm.clone(), next);
     };
 
+    // Contacts available for the "add decision" picker (non-own, sorted by alias).
+    let picker_contacts: Vec<(String, String)> = {
+        let mut v: Vec<_> = address_book::all_contacts()
+            .into_iter()
+            .filter(|c| {
+                !aft_now
+                    .permission_decisions
+                    .contains_key(&c.fingerprint_full())
+            })
+            .map(|c| (c.local_alias.to_string(), c.fingerprint_full()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+
+    // Local form state for the "Add decision" form.
+    let mut add_fp = use_signal(String::new);
+    let mut add_accept = use_signal(|| true); // true = Accept, false = Deny
+
+    let alias_key_add = alias_key.clone();
+    let ident_add = ident.clone();
+    let on_add_decision = move |_| {
+        let fp = add_fp.read().clone();
+        if fp.is_empty() {
+            return;
+        }
+        let decision = if *add_accept.read() {
+            PermissionDecision::Accept
+        } else {
+            PermissionDecision::Deny
+        };
+        let mut next = ident_add.clone();
+        next.aft.permission_decisions.insert(fp, decision);
+        local_state::persist_identity_settings(alias_key_add.clone(), next);
+        // Reset form.
+        add_fp.set(String::new());
+        add_accept.set(true);
+    };
+
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
@@ -845,6 +884,71 @@ fn ScrAft() -> Element {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                // "Add decision" form — only shown when at least one contact
+                // exists that doesn't already have a saved decision.
+                if !picker_contacts.is_empty() {
+                    div {
+                        style: "padding: 12px 16px 8px; border-top: 1px solid var(--line2);",
+                        "data-testid": "fm-aft-add-decision",
+                        div {
+                            style: "font-size: 11.5px; color: var(--ink3); margin-bottom: 8px;",
+                            "Add per-recipient decision"
+                        }
+                        div { style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
+                            select {
+                                class: "fm-select",
+                                "data-testid": "fm-aft-add-decision-contact",
+                                value: "{add_fp.read()}",
+                                onchange: move |ev| add_fp.set(ev.value()),
+                                option { value: "", disabled: true, selected: add_fp.read().is_empty(), "— choose contact —" }
+                                for (alias, fp) in picker_contacts.iter() {
+                                    {
+                                        let fp_clone = fp.clone();
+                                        rsx! {
+                                            option {
+                                                key: "{fp_clone}",
+                                                value: "{fp_clone}",
+                                                "{alias}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Accept / Deny radio group
+                            label {
+                                style: "display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;",
+                                input {
+                                    r#type: "radio",
+                                    name: "add-decision-choice",
+                                    "data-testid": "fm-aft-add-decision-accept",
+                                    checked: *add_accept.read(),
+                                    onchange: move |_| add_accept.set(true),
+                                }
+                                "Accept"
+                            }
+                            label {
+                                style: "display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer;",
+                                input {
+                                    r#type: "radio",
+                                    name: "add-decision-choice",
+                                    "data-testid": "fm-aft-add-decision-deny",
+                                    checked: !*add_accept.read(),
+                                    onchange: move |_| add_accept.set(false),
+                                }
+                                "Deny"
+                            }
+                            button {
+                                class: "fm-btn-primary",
+                                style: "height: 28px; padding: 0 12px; font-size: 12px;",
+                                "data-testid": "fm-aft-add-decision-save",
+                                r#type: "button",
+                                disabled: add_fp.read().is_empty(),
+                                onclick: on_add_decision,
+                                "Save"
                             }
                         }
                     }
@@ -1278,6 +1382,109 @@ mod tests {
         assert_eq!(
             resolve_permission_decision(&prefs, FP, true),
             Some(PermissionDecision::Accept),
+        );
+    }
+
+    /// Write-path: `local_set_identity_settings` persists a new
+    /// `PermissionDecision` entry and `identity_settings_for` reads it
+    /// back. This covers the production write path exercised by the
+    /// Settings → AFT "Add decision" Save button (#159).
+    #[test]
+    fn permission_decision_write_path_persists_and_reads_back() {
+        use crate::local_state;
+        use mail_local_state::{IdentitySettings, LocalState};
+
+        // Seed a clean snapshot so the test is isolated.
+        let mut state = LocalState::default();
+        let alias = "alice";
+        state
+            .aliases_mut()
+            .entry(alias.to_string())
+            .or_default()
+            .settings = IdentitySettings::default();
+        local_state::replace_snapshot(state);
+
+        // Simulate the Save-button handler: read current settings, insert
+        // the decision, then persist via `local_set_identity_settings`.
+        let mut settings = local_state::identity_settings_for(alias);
+        assert!(
+            settings.aft.permission_decisions.is_empty(),
+            "no decisions yet"
+        );
+        settings
+            .aft
+            .permission_decisions
+            .insert(FP.to_string(), PermissionDecision::Accept);
+        local_state::local_set_identity_settings(alias, settings);
+
+        // Read back via the same path the permission pump uses.
+        let read_back = local_state::identity_settings_for(alias);
+        assert_eq!(
+            read_back.aft.permission_decisions.get(FP),
+            Some(&PermissionDecision::Accept),
+            "persisted Accept decision must round-trip through SNAPSHOT"
+        );
+
+        // Inserting Deny for a second fingerprint must not disturb the first.
+        let fp2 = "balance-better-bitter-black-blame-blind";
+        let mut settings2 = local_state::identity_settings_for(alias);
+        settings2
+            .aft
+            .permission_decisions
+            .insert(fp2.to_string(), PermissionDecision::Deny);
+        local_state::local_set_identity_settings(alias, settings2);
+
+        let read_back2 = local_state::identity_settings_for(alias);
+        assert_eq!(
+            read_back2.aft.permission_decisions.get(FP),
+            Some(&PermissionDecision::Accept),
+            "first decision must survive second insert"
+        );
+        assert_eq!(
+            read_back2.aft.permission_decisions.get(fp2),
+            Some(&PermissionDecision::Deny),
+            "second decision must be persisted"
+        );
+    }
+
+    /// Remove-path: removing a saved decision from the map and persisting
+    /// must make it disappear from `identity_settings_for`. Covers the
+    /// "Revoke" button handler (#159).
+    #[test]
+    fn permission_decision_remove_path_clears_entry() {
+        use crate::local_state;
+        use mail_local_state::{IdentitySettings, LocalState};
+
+        let mut state = LocalState::default();
+        let alias = "bob";
+        let mut base = IdentitySettings::default();
+        base.aft
+            .permission_decisions
+            .insert(FP.to_string(), PermissionDecision::Deny);
+        state
+            .aliases_mut()
+            .entry(alias.to_string())
+            .or_default()
+            .settings = base;
+        local_state::replace_snapshot(state);
+
+        // Verify it's there before removal.
+        let before = local_state::identity_settings_for(alias);
+        assert_eq!(
+            before.aft.permission_decisions.get(FP),
+            Some(&PermissionDecision::Deny),
+            "precondition: Deny must be present before removal"
+        );
+
+        // Simulate the Remove button handler.
+        let mut settings = local_state::identity_settings_for(alias);
+        settings.aft.permission_decisions.remove(FP);
+        local_state::local_set_identity_settings(alias, settings);
+
+        let after = local_state::identity_settings_for(alias);
+        assert!(
+            !after.aft.permission_decisions.contains_key(FP),
+            "removed decision must not appear in SNAPSHOT"
         );
     }
 }

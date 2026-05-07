@@ -776,8 +776,10 @@ pub(crate) async fn node_comms(
     // active identity's AFT policy dictates (auto_accept_verified_contacts
     // or a per-recipient saved decision). The pump is a no-op when no
     // policy matches — the gateway shell modal handles it normally.
+    // The toast signal is passed so the pump can notify the user when an
+    // AFT token is spent automatically (#159).
     #[cfg(target_family = "wasm")]
-    permission_pump::spawn(user);
+    permission_pump::spawn(user, toast);
 
     static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
     IDENTITIES_KEY.set(identities_key.clone()).unwrap();
@@ -1764,6 +1766,7 @@ pub(crate) async fn node_comms(
 /// doesn't block the request/response pipeline.
 #[cfg(all(target_family = "wasm", feature = "use-node"))]
 pub(crate) mod permission_pump {
+    use dioxus::prelude::{ReadableExt, WritableExt};
     use mail_local_state::PermissionDecision;
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen::JsValue;
@@ -1906,8 +1909,6 @@ pub(crate) mod permission_pump {
         pending_recipient_vk_bytes: &[Vec<u8>],
         user: dioxus::prelude::Signal<crate::app::User>,
     ) -> Option<u8> {
-        use dioxus::prelude::ReadableExt;
-
         // Identify which of the user's identities is doing the send.
         let active_alias = {
             let user_guard = user.read();
@@ -1958,10 +1959,14 @@ pub(crate) mod permission_pump {
     /// Fetches pending prompts, evaluates policy for each, and responds
     /// automatically when the policy dictates. Nonces that have already been
     /// seen (but had no saved policy) are skipped on subsequent ticks.
+    ///
+    /// When an auto-response fires, a brief toast is emitted so the user
+    /// knows the AFT token was spent silently (#159).
     pub(crate) async fn tick(
         origin: &str,
         seen: &mut std::collections::HashSet<String>,
         user: dioxus::prelude::Signal<crate::app::User>,
+        mut toast: dioxus::prelude::Signal<Option<String>>,
     ) {
         let prompts = match fetch_pending(origin).await {
             Ok(p) => p,
@@ -2002,7 +2007,31 @@ pub(crate) mod permission_pump {
                         seen.insert(prompt.nonce.clone());
                         // Once a decision is applied, drain the pending
                         // recipients so the next send starts fresh.
-                        crate::aft::AftRecords::drain_pending_recipient_vk_bytes();
+                        let drained_vk = crate::aft::AftRecords::drain_pending_recipient_vk_bytes();
+                        // Emit a brief toast so the user sees that a token
+                        // was spent automatically (#159). Resolve the
+                        // recipient alias from the first drained VK, falling
+                        // back to "a contact" when lookup fails.
+                        let recipient_label = drained_vk
+                            .first()
+                            .and_then(|vk| {
+                                crate::app::address_book::contact_by_vk(vk)
+                                    .map(|c| c.local_alias.to_string())
+                            })
+                            .unwrap_or_else(|| "a contact".to_string());
+                        let action_label = if index == 0 { "approved" } else { "denied" };
+                        let msg = format!("Token {action_label} for {recipient_label}");
+                        toast.set(Some(msg));
+                        // Auto-clear the toast after 2.5 s to mirror the
+                        // app-wide `spawn_toast_clear` convention.
+                        let mut toast_clear = toast;
+                        dioxus::core::spawn_forever(async move {
+                            gloo_timers::future::sleep(std::time::Duration::from_millis(2500))
+                                .await;
+                            if toast_clear.read().is_some() {
+                                toast_clear.set(None);
+                            }
+                        });
                     }
                     Err(e) => {
                         crate::log::error(
@@ -2033,7 +2062,13 @@ pub(crate) mod permission_pump {
     /// prompts. It is started once from `node_comms` after the WebSocket
     /// connection is established. Under `no-sync` or non-WASM builds this
     /// function does not exist (the caller is also `#[cfg(…)]`).
-    pub(crate) fn spawn(user: dioxus::prelude::Signal<crate::app::User>) {
+    ///
+    /// `toast` is the app-wide toast signal; the pump writes to it whenever
+    /// it auto-responds to a pending permission prompt (#159).
+    pub(crate) fn spawn(
+        user: dioxus::prelude::Signal<crate::app::User>,
+        toast: dioxus::prelude::Signal<Option<String>>,
+    ) {
         let Some(origin) = gateway_origin() else {
             crate::log::error("permission pump: could not derive gateway origin", None);
             return;
@@ -2041,7 +2076,7 @@ pub(crate) mod permission_pump {
         dioxus::core::spawn_forever(async move {
             let mut seen = std::collections::HashSet::<String>::new();
             loop {
-                tick(&origin, &mut seen, user).await;
+                tick(&origin, &mut seen, user, toast).await;
                 gloo_timers::future::sleep(std::time::Duration::from_millis(
                     PUMP_INTERVAL_MS as u64,
                 ))

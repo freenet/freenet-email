@@ -13,9 +13,11 @@
 //! ported in this pass; first cut is desktop-only.
 
 use dioxus::prelude::*;
+#[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
+use mail_local_state::IdentityAftPrefs;
 use mail_local_state::{
-    Density, GlobalSettings, IdentityAftPrefs, IdentityPrivacyPrefs, IdentitySettings,
-    InboxSettings, PermissionDecision, Theme,
+    Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
+    PermissionDecision, Theme,
 };
 
 use crate::app::User;

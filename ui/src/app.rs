@@ -655,6 +655,48 @@ impl Message {
     }
 }
 
+// ── Sort comparators ────────────────────────────────────────────────────────
+//
+// One function per folder shape.  All comparators sort newest-first with a
+// deterministic tie-break so that HashMap-backed collections do not reorder on
+// re-render (issue #137).  Use these at every sort site AND in unit tests so
+// the two cannot drift apart.
+
+/// Inbox: newest `Message` first; tie-break by `id` descending (monotonic u64
+/// — higher id = later arrival).
+fn sort_cmp_inbox(a: &Message, b: &Message) -> std::cmp::Ordering {
+    b.time.cmp(&a.time).then(b.id.cmp(&a.id))
+}
+
+/// Drafts: newest first by `updated_at`; tie-break by UUID string descending
+/// (for stability only — UUID v4 ordering is not chronological).
+fn sort_cmp_drafts(
+    a: &(String, mail_local_state::Draft),
+    b: &(String, mail_local_state::Draft),
+) -> std::cmp::Ordering {
+    b.1.updated_at.cmp(&a.1.updated_at).then(b.0.cmp(&a.0))
+}
+
+/// Sent: newest first by `sent_at`; tie-break by UUID string descending
+/// (for stability only — UUID v4 ordering is not chronological).
+fn sort_cmp_sent(
+    a: &(String, mail_local_state::SentMessage),
+    b: &(String, mail_local_state::SentMessage),
+) -> std::cmp::Ordering {
+    b.1.sent_at.cmp(&a.1.sent_at).then(b.0.cmp(&a.0))
+}
+
+/// Archive: newest first by `archived_at`; tie-break by `id` descending
+/// (monotonic u64 — higher id = later arrival).
+fn sort_cmp_archive(
+    a: &(u64, mail_local_state::ArchivedMessage),
+    b: &(u64, mail_local_state::ArchivedMessage),
+) -> std::cmp::Ordering {
+    b.1.archived_at.cmp(&a.1.archived_at).then(b.0.cmp(&a.0))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
 impl From<MessageModel> for Message {
     fn from(value: MessageModel) -> Self {
         Message {
@@ -1300,7 +1342,10 @@ fn MessageList() -> Element {
             .cloned()
             .collect();
         // Newest first (#49). Sender-stamped time is what the design assumes.
-        v.sort_by_key(|m| std::cmp::Reverse(m.time));
+        // Tie-break by id descending so that messages with identical 1-second
+        // timestamps always appear in a deterministic order regardless of the
+        // HashMap iteration order of the underlying kept-message map (#137).
+        v.sort_by(sort_cmp_inbox);
         v
     } else {
         Vec::new()
@@ -1309,8 +1354,9 @@ fn MessageList() -> Element {
         || (matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox)
     {
         let mut d = crate::local_state::drafts_for(&active_alias);
-        // Newest first.
-        d.sort_by_key(|b| std::cmp::Reverse(b.1.updated_at));
+        // Newest first; tie-break by UUID string for stability only — UUID v4
+        // order is not chronological (#137).
+        d.sort_by(sort_cmp_drafts);
         d
     } else {
         Vec::new()
@@ -1318,7 +1364,9 @@ fn MessageList() -> Element {
     let sent_msgs: Vec<(String, mail_local_state::SentMessage)> =
         if matches!(folder, menu::Folder::Sent) {
             let mut s = crate::local_state::sent_for(&active_alias);
-            s.sort_by_key(|b| std::cmp::Reverse(b.1.sent_at));
+            // Newest first; tie-break by UUID string for stability only — UUID v4
+            // order is not chronological (#137).
+            s.sort_by(sort_cmp_sent);
             s
         } else {
             Vec::new()
@@ -1326,7 +1374,8 @@ fn MessageList() -> Element {
     let archived_msgs: Vec<(u64, mail_local_state::ArchivedMessage)> =
         if matches!(folder, menu::Folder::Archive) {
             let mut a = crate::local_state::archived_for(&active_alias);
-            a.sort_by_key(|b| std::cmp::Reverse(b.1.archived_at));
+            // Newest first; tie-break by message id for deterministic order (#137).
+            a.sort_by(sort_cmp_archive);
             a
         } else {
             Vec::new()
@@ -2615,5 +2664,249 @@ mod time_format_tests {
         let s = format_time_full(old);
         assert!(s.contains('·'), "got {s:?}");
         assert!(s.contains(':'), "got {s:?}");
+    }
+}
+
+#[cfg(test)]
+mod inbox_sort_tests {
+    use super::{Message, sort_cmp_inbox};
+    use chrono::{TimeZone, Utc};
+    use std::borrow::Cow;
+
+    fn make_msg(id: u64, timestamp_secs: i64) -> Message {
+        Message {
+            id,
+            from: Cow::Borrowed("test@test"),
+            title: Cow::Borrowed("subject"),
+            content: Cow::Borrowed("body"),
+            read: false,
+            time: Utc.timestamp_opt(timestamp_secs, 0).unwrap(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+        }
+    }
+
+    /// Messages with distinct timestamps should be sorted newest-first.
+    #[test]
+    fn sort_by_time_desc() {
+        let mut v = [make_msg(1, 1_000), make_msg(2, 3_000), make_msg(3, 2_000)];
+        v.sort_by(sort_cmp_inbox);
+        let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
+    }
+
+    /// When timestamps tie, higher id should come first (deterministic
+    /// tie-break — fixes the HashMap reorder on click, issue #137).
+    #[test]
+    fn tie_break_by_id_desc() {
+        let ts = 5_000;
+        let mut v = [make_msg(10, ts), make_msg(30, ts), make_msg(20, ts)];
+        v.sort_by(sort_cmp_inbox);
+        let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
+        // Regardless of input order, higher id must come first.
+        assert_eq!(ids, vec![30, 20, 10]);
+    }
+
+    /// Calling sort twice on the same vec must produce the same order —
+    /// i.e. the sort is stable and deterministic across re-renders.
+    #[test]
+    fn sort_is_idempotent() {
+        let ts = 7_000;
+        let mut v = [
+            make_msg(5, ts),
+            make_msg(1, ts),
+            make_msg(3, ts),
+            make_msg(4, 8_000),
+        ];
+        v.sort_by(sort_cmp_inbox);
+        let first: Vec<u64> = v.iter().map(|m| m.id).collect();
+        v.sort_by(sort_cmp_inbox);
+        let second: Vec<u64> = v.iter().map(|m| m.id).collect();
+        assert_eq!(first, second, "sort must be idempotent");
+    }
+}
+
+#[cfg(test)]
+mod folder_sort_tests {
+    use super::{sort_cmp_archive, sort_cmp_drafts, sort_cmp_sent};
+    use mail_local_state::{ArchivedMessage, Draft, SentMessage};
+
+    fn make_draft(id: &str, updated_at: i64) -> (String, Draft) {
+        (
+            id.to_string(),
+            Draft {
+                to: "a@b".to_string(),
+                subject: "s".to_string(),
+                body: "b".to_string(),
+                updated_at,
+            },
+        )
+    }
+
+    fn make_sent(id: &str, sent_at: i64) -> (String, SentMessage) {
+        (
+            id.to_string(),
+            SentMessage {
+                to: "a@b".to_string(),
+                recipient_fingerprint: String::new(),
+                recipient_fingerprint_full: String::new(),
+                subject: "s".to_string(),
+                body: "b".to_string(),
+                sent_at,
+                delivery_state: mail_local_state::DeliveryState::Delivered,
+            },
+        )
+    }
+
+    fn make_archived(id: u64, archived_at: i64) -> (u64, ArchivedMessage) {
+        (
+            id,
+            ArchivedMessage {
+                from: "a@b".to_string(),
+                title: "t".to_string(),
+                content: "c".to_string(),
+                archived_at,
+            },
+        )
+    }
+
+    // ── Drafts ───────────────────────────────────────────────────────────────
+
+    /// Drafts should appear newest-first by `updated_at`.
+    #[test]
+    fn drafts_sort_time_desc() {
+        let mut d = [
+            make_draft("id-1", 1_000),
+            make_draft("id-2", 3_000),
+            make_draft("id-3", 2_000),
+        ];
+        d.sort_by(sort_cmp_drafts);
+        let ids: Vec<&str> = d.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["id-2", "id-3", "id-1"]);
+    }
+
+    /// Drafts with the same `updated_at` must tie-break deterministically
+    /// (UUID string descending — for stability, not chronological ordering).
+    #[test]
+    fn drafts_tie_break_by_id_desc() {
+        let ts = 5_000;
+        let mut d = [
+            make_draft("aaa", ts),
+            make_draft("ccc", ts),
+            make_draft("bbb", ts),
+        ];
+        d.sort_by(sort_cmp_drafts);
+        let ids: Vec<&str> = d.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["ccc", "bbb", "aaa"]);
+    }
+
+    /// Sorting drafts twice must produce the same order.
+    #[test]
+    fn drafts_sort_idempotent() {
+        let ts = 7_000;
+        let mut d = [
+            make_draft("x", ts),
+            make_draft("y", ts),
+            make_draft("z", ts),
+            make_draft("w", 8_000),
+        ];
+        d.sort_by(sort_cmp_drafts);
+        let first: Vec<String> = d.iter().map(|(id, _)| id.clone()).collect();
+        d.sort_by(sort_cmp_drafts);
+        let second: Vec<String> = d.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(first, second, "drafts sort must be idempotent");
+    }
+
+    // ── Sent ─────────────────────────────────────────────────────────────────
+
+    /// Sent messages should appear newest-first by `sent_at`.
+    #[test]
+    fn sent_sort_time_desc() {
+        let mut s = [
+            make_sent("id-1", 1_000),
+            make_sent("id-2", 3_000),
+            make_sent("id-3", 2_000),
+        ];
+        s.sort_by(sort_cmp_sent);
+        let ids: Vec<&str> = s.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["id-2", "id-3", "id-1"]);
+    }
+
+    /// Sent messages with the same `sent_at` must tie-break deterministically.
+    #[test]
+    fn sent_tie_break_by_id_desc() {
+        let ts = 5_000;
+        let mut s = [
+            make_sent("aaa", ts),
+            make_sent("ccc", ts),
+            make_sent("bbb", ts),
+        ];
+        s.sort_by(sort_cmp_sent);
+        let ids: Vec<&str> = s.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["ccc", "bbb", "aaa"]);
+    }
+
+    /// Sorting sent twice must produce the same order.
+    #[test]
+    fn sent_sort_idempotent() {
+        let ts = 7_000;
+        let mut s = [
+            make_sent("x", ts),
+            make_sent("y", ts),
+            make_sent("z", ts),
+            make_sent("w", 8_000),
+        ];
+        s.sort_by(sort_cmp_sent);
+        let first: Vec<String> = s.iter().map(|(id, _)| id.clone()).collect();
+        s.sort_by(sort_cmp_sent);
+        let second: Vec<String> = s.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(first, second, "sent sort must be idempotent");
+    }
+
+    // ── Archive ───────────────────────────────────────────────────────────────
+
+    /// Archived messages should appear newest-first by `archived_at`.
+    #[test]
+    fn archive_sort_time_desc() {
+        let mut a = [
+            make_archived(1, 1_000),
+            make_archived(2, 3_000),
+            make_archived(3, 2_000),
+        ];
+        a.sort_by(sort_cmp_archive);
+        let ids: Vec<u64> = a.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
+    }
+
+    /// Archived messages with the same `archived_at` must tie-break by id
+    /// descending (monotonic u64).
+    #[test]
+    fn archive_tie_break_by_id_desc() {
+        let ts = 5_000;
+        let mut a = [
+            make_archived(10, ts),
+            make_archived(30, ts),
+            make_archived(20, ts),
+        ];
+        a.sort_by(sort_cmp_archive);
+        let ids: Vec<u64> = a.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![30, 20, 10]);
+    }
+
+    /// Sorting archived twice must produce the same order.
+    #[test]
+    fn archive_sort_idempotent() {
+        let ts = 7_000;
+        let mut a = [
+            make_archived(5, ts),
+            make_archived(1, ts),
+            make_archived(3, ts),
+            make_archived(4, 8_000),
+        ];
+        a.sort_by(sort_cmp_archive);
+        let first: Vec<u64> = a.iter().map(|(id, _)| *id).collect();
+        a.sort_by(sort_cmp_archive);
+        let second: Vec<u64> = a.iter().map(|(id, _)| *id).collect();
+        assert_eq!(first, second, "archive sort must be idempotent");
     }
 }

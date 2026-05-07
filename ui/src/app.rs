@@ -1300,7 +1300,10 @@ fn MessageList() -> Element {
             .cloned()
             .collect();
         // Newest first (#49). Sender-stamped time is what the design assumes.
-        v.sort_by_key(|m| std::cmp::Reverse(m.time));
+        // Tie-break by id descending so that messages with identical 1-second
+        // timestamps always appear in a deterministic order regardless of the
+        // HashMap iteration order of the underlying kept-message map (#137).
+        v.sort_by(|a, b| b.time.cmp(&a.time).then(b.id.cmp(&a.id)));
         v
     } else {
         Vec::new()
@@ -1309,8 +1312,9 @@ fn MessageList() -> Element {
         || (matches!(folder, menu::Folder::Inbox) && inbox_settings.drafts_in_inbox)
     {
         let mut d = crate::local_state::drafts_for(&active_alias);
-        // Newest first.
-        d.sort_by_key(|b| std::cmp::Reverse(b.1.updated_at));
+        // Newest first; tie-break by id so HashMap iteration order doesn't
+        // cause reordering on re-render (#137).
+        d.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at).then(b.0.cmp(&a.0)));
         d
     } else {
         Vec::new()
@@ -1318,7 +1322,8 @@ fn MessageList() -> Element {
     let sent_msgs: Vec<(String, mail_local_state::SentMessage)> =
         if matches!(folder, menu::Folder::Sent) {
             let mut s = crate::local_state::sent_for(&active_alias);
-            s.sort_by_key(|b| std::cmp::Reverse(b.1.sent_at));
+            // Newest first; tie-break by id for deterministic order (#137).
+            s.sort_by(|a, b| b.1.sent_at.cmp(&a.1.sent_at).then(b.0.cmp(&a.0)));
             s
         } else {
             Vec::new()
@@ -1326,7 +1331,8 @@ fn MessageList() -> Element {
     let archived_msgs: Vec<(u64, mail_local_state::ArchivedMessage)> =
         if matches!(folder, menu::Folder::Archive) {
             let mut a = crate::local_state::archived_for(&active_alias);
-            a.sort_by_key(|b| std::cmp::Reverse(b.1.archived_at));
+            // Newest first; tie-break by message id for deterministic order (#137).
+            a.sort_by(|x, y| y.1.archived_at.cmp(&x.1.archived_at).then(y.0.cmp(&x.0)));
             a
         } else {
             Vec::new()
@@ -2615,5 +2621,75 @@ mod time_format_tests {
         let s = format_time_full(old);
         assert!(s.contains('·'), "got {s:?}");
         assert!(s.contains(':'), "got {s:?}");
+    }
+}
+
+#[cfg(test)]
+mod inbox_sort_tests {
+    use super::Message;
+    use chrono::{TimeZone, Utc};
+    use std::borrow::Cow;
+
+    fn make_msg(id: u64, timestamp_secs: i64) -> Message {
+        Message {
+            id,
+            from: Cow::Borrowed("test@test"),
+            title: Cow::Borrowed("subject"),
+            content: Cow::Borrowed("body"),
+            read: false,
+            time: Utc.timestamp_opt(timestamp_secs, 0).unwrap(),
+            sender_vk: Vec::new(),
+            signature_valid: false,
+        }
+    }
+
+    /// Messages with distinct timestamps should be sorted newest-first.
+    #[test]
+    fn sort_by_time_desc() {
+        let mut v = vec![
+            make_msg(1, 1_000),
+            make_msg(2, 3_000),
+            make_msg(3, 2_000),
+        ];
+        v.sort_by(|a, b| b.time.cmp(&a.time).then(b.id.cmp(&a.id)));
+        let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
+    }
+
+    /// When timestamps tie, higher id should come first (deterministic
+    /// tie-break — fixes the HashMap reorder on click, issue #137).
+    #[test]
+    fn tie_break_by_id_desc() {
+        let ts = 5_000;
+        let mut v = vec![
+            make_msg(10, ts),
+            make_msg(30, ts),
+            make_msg(20, ts),
+        ];
+        v.sort_by(|a, b| b.time.cmp(&a.time).then(b.id.cmp(&a.id)));
+        let ids: Vec<u64> = v.iter().map(|m| m.id).collect();
+        // Regardless of input order, higher id must come first.
+        assert_eq!(ids, vec![30, 20, 10]);
+    }
+
+    /// Calling sort twice on the same vec must produce the same order —
+    /// i.e. the sort is stable and deterministic across re-renders.
+    #[test]
+    fn sort_is_idempotent() {
+        let ts = 7_000;
+        let mut v = vec![
+            make_msg(5, ts),
+            make_msg(1, ts),
+            make_msg(3, ts),
+            make_msg(4, 8_000),
+        ];
+        let sort = |v: &mut Vec<Message>| {
+            v.sort_by(|a, b| b.time.cmp(&a.time).then(b.id.cmp(&a.id)));
+        };
+        sort(&mut v);
+        let first: Vec<u64> = v.iter().map(|m| m.id).collect();
+        sort(&mut v);
+        let second: Vec<u64> = v.iter().map(|m| m.id).collect();
+        assert_eq!(first, second, "sort must be idempotent");
     }
 }

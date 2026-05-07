@@ -154,6 +154,22 @@ pub struct KeptMessage {
     pub kept_at: i64,
 }
 
+/// Saved permission decision for a specific recipient.
+///
+/// Stored in `IdentityAftPrefs::permission_decisions`, keyed by the
+/// recipient's six-word fingerprint string (dash-joined, all lower-case as
+/// returned by `address_book::fingerprint_words`).  The key identifies the
+/// recipient's keypair without exposing raw key bytes to the delegate stash.
+#[derive(Deserialize, Serialize, PartialEq, Eq, Debug, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    /// Automatically send the "accept" response to the gateway when this
+    /// recipient's send triggers a permission prompt.
+    Accept,
+    /// Automatically send the "deny" response.
+    Deny,
+}
+
 /// Per-identity AFT preferences. The required tier and the allow-known /
 /// allow-anonymous flags govern which incoming messages this identity will
 /// accept; `bounce_message` is shown to senders whose tier is below the
@@ -179,6 +195,17 @@ pub struct IdentityAftPrefs {
     pub allow_anon: bool,
     /// Optional bounce message shown to senders below the required tier.
     pub bounce_message: String,
+    /// When `true`, any send to a verified contact (verified=true in the
+    /// address book) skips the permission modal and is auto-accepted.
+    /// Implements issue #149 Part 3.
+    #[serde(default)]
+    pub auto_accept_verified_contacts: bool,
+    /// Per-recipient saved decisions ("remember this choice"). Keyed by
+    /// the recipient's full six-word fingerprint (dash-joined). When an
+    /// entry is present the permission modal is bypassed and the saved
+    /// response is posted automatically. Implements issue #149 Part 2.
+    #[serde(default)]
+    pub permission_decisions: HashMap<String, PermissionDecision>,
 }
 
 fn default_max_age_days() -> u64 {
@@ -193,6 +220,8 @@ impl Default for IdentityAftPrefs {
             allow_known: true,
             allow_anon: false,
             bounce_message: String::new(),
+            auto_accept_verified_contacts: false,
+            permission_decisions: HashMap::new(),
         }
     }
 }
@@ -934,6 +963,8 @@ mod boundary_tests {
                 allow_known: true,
                 allow_anon: true,
                 bounce_message: "rate-limited".into(),
+                auto_accept_verified_contacts: false,
+                permission_decisions: HashMap::new(),
             },
             privacy: IdentityPrivacyPrefs {
                 verify_on_send: false,
@@ -1006,5 +1037,51 @@ mod boundary_tests {
         assert!(iter.next().is_none());
         assert_eq!(sent.to, "bob");
         assert_eq!(sent.delivery_state, DeliveryState::Delivered);
+    }
+
+    /// `IdentityAftPrefs` written before `auto_accept_verified_contacts` and
+    /// `permission_decisions` landed must deserialise without those fields,
+    /// defaulting to `false` / empty map. Verifies the new fields are additive.
+    #[test]
+    fn aft_prefs_missing_new_fields_defaults_to_off() {
+        let json = br#"{"required_tier":"Min10","max_age_days":365,"allow_known":true,"allow_anon":false,"bounce_message":""}"#;
+        let prefs: IdentityAftPrefs = serde_json::from_slice(json).expect("should deserialise");
+        assert!(!prefs.auto_accept_verified_contacts);
+        assert!(prefs.permission_decisions.is_empty());
+    }
+
+    /// Round-trip: a saved `Accept` decision for a fingerprint survives
+    /// serialise → deserialise.
+    #[test]
+    fn permission_decision_round_trips() {
+        let mut prefs = IdentityAftPrefs::default();
+        prefs.permission_decisions.insert(
+            "abandon-ability-able".to_string(),
+            PermissionDecision::Accept,
+        );
+        prefs.auto_accept_verified_contacts = true;
+        let bytes = serde_json::to_vec(&prefs).unwrap();
+        let back: IdentityAftPrefs = serde_json::from_slice(&bytes).unwrap();
+        assert!(back.auto_accept_verified_contacts);
+        assert_eq!(
+            back.permission_decisions.get("abandon-ability-able"),
+            Some(&PermissionDecision::Accept),
+        );
+    }
+
+    /// Provide a decision-lookup helper so callers don't need to know the
+    /// internal key format. `None` means "no saved decision" (show modal).
+    #[test]
+    fn saved_decision_lookup_by_fingerprint() {
+        let fp = "abandon-ability-able-about-above-absent";
+        let mut prefs = IdentityAftPrefs::default();
+        assert_eq!(prefs.permission_decisions.get(fp), None, "no decision yet");
+        prefs
+            .permission_decisions
+            .insert(fp.to_string(), PermissionDecision::Deny);
+        assert_eq!(
+            prefs.permission_decisions.get(fp),
+            Some(&PermissionDecision::Deny),
+        );
     }
 }

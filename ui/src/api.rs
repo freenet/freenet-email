@@ -771,6 +771,14 @@ pub(crate) async fn node_comms(
 
     WEB_API_SENDER.set(req_sender).unwrap();
 
+    // Start the permission pump background task (#149). It polls the
+    // gateway's /permission/pending endpoint and auto-responds when the
+    // active identity's AFT policy dictates (auto_accept_verified_contacts
+    // or a per-recipient saved decision). The pump is a no-op when no
+    // policy matches — the gateway shell modal handles it normally.
+    #[cfg(target_family = "wasm")]
+    permission_pump::spawn(user);
+
     static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
     IDENTITIES_KEY.set(identities_key.clone()).unwrap();
 
@@ -1729,6 +1737,317 @@ pub(crate) async fn node_comms(
                 }
             }
         }
+    }
+}
+
+/// Permission pump — polls the gateway `/permission/pending` endpoint and
+/// auto-responds when the active identity's AFT policy dictates.
+///
+/// The Freenet gateway surfaces a permission modal (in its shell page HTML)
+/// each time the AFT token-generator delegate requests a new token.
+/// Since the modal is rendered in the gateway shell (external), the UI
+/// cannot intercept or suppress it directly. Instead, this pump polls
+/// the HTTP API endpoint (`/permission/pending`) and POSTs responses
+/// before the user sees the modal — effectively making the permission
+/// invisible when the policy says to auto-accept or auto-deny.
+///
+/// Auto-respond rules (evaluated in priority order, #149):
+/// 1. **Per-recipient saved decision** (`IdentityAftPrefs::permission_decisions`):
+///    if the outgoing send's recipient fingerprint matches a saved decision,
+///    respond with the saved choice (accept = index 0, deny = index 1).
+/// 2. **Auto-accept verified contacts** (`IdentityAftPrefs::auto_accept_verified_contacts`):
+///    if the send is to a verified contact, respond accept.
+/// 3. No rule matches → do nothing (gateway shows the modal normally).
+///
+/// The pump is only active under `use-node` / WASM builds. It runs as a
+/// `spawn_forever` task, not inside the main `node_comms` loop, so it
+/// doesn't block the request/response pipeline.
+#[cfg(all(target_family = "wasm", feature = "use-node"))]
+pub(crate) mod permission_pump {
+    use mail_local_state::PermissionDecision;
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
+    use web_sys::{Headers, Request, RequestInit, Response};
+
+    use crate::app::address_book;
+
+    /// How often the pump polls `/permission/pending` (milliseconds).
+    /// Short enough to respond before the user notices the modal; long
+    /// enough not to flood the gateway.
+    pub(crate) const PUMP_INTERVAL_MS: u32 = 300;
+
+    /// Representation of a pending permission prompt returned by the gateway.
+    #[derive(serde::Deserialize)]
+    struct PendingPrompt {
+        nonce: String,
+        /// The raw message from the delegate (JSON string). Contains the
+        /// token request including the sender's `user` (VK) field.
+        #[serde(default)]
+        message: Option<String>,
+    }
+
+    /// Minimal parse of the token message embedded in the permission prompt.
+    /// Only the fields we care about for policy evaluation.
+    #[derive(serde::Deserialize, Default)]
+    struct TokenMsg {
+        #[serde(default)]
+        token: TokenFields,
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct TokenFields {
+        /// Sender VK encoded as `ml-dsa-65:<hex>`.
+        #[serde(default)]
+        user: String,
+    }
+
+    /// Derive the gateway HTTP origin from the current page's `window.location`.
+    /// Returns e.g. `http://127.0.0.1:7510`.
+    fn gateway_origin() -> Option<String> {
+        let window = web_sys::window()?;
+        let location = window.location();
+        let protocol = location.protocol().ok()?;
+        let host = location.host().ok()?;
+        Some(format!("{}//{}", protocol, host))
+    }
+
+    /// Perform a `fetch(url, init)` and return the `Response`. Errors from
+    /// the JS Promise are converted to `String` for logging.
+    async fn js_fetch(url: &str, init: &RequestInit) -> Result<Response, String> {
+        let request = Request::new_with_str_and_init(url, init).map_err(|e| format!("{e:?}"))?;
+        let window = web_sys::window().ok_or("no window")?;
+        let promise = window.fetch_with_request(&request);
+        let response_js = JsFuture::from(promise)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(response_js.unchecked_into::<Response>())
+    }
+
+    /// Fetch `GET /permission/pending` and return the parsed list of prompts.
+    async fn fetch_pending(origin: &str) -> Result<Vec<PendingPrompt>, String> {
+        let url = format!("{origin}/permission/pending");
+        let init = RequestInit::new();
+        // GET is the default; no body needed.
+        let response = js_fetch(&url, &init).await?;
+        if !response.ok() {
+            return Err(format!(
+                "GET /permission/pending returned {}",
+                response.status()
+            ));
+        }
+        let json_promise = response.json().map_err(|e| format!("{e:?}"))?;
+        let json_js = JsFuture::from(json_promise)
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        let prompts: Vec<PendingPrompt> =
+            serde_wasm_bindgen::from_value(json_js).map_err(|e| format!("{e}"))?;
+        Ok(prompts)
+    }
+
+    /// POST `{"index": <n>}` to `/permission/{nonce}/respond`.
+    ///
+    /// `index = 0` means "accept" (the first button in the gateway shell's
+    /// modal); `index = 1` means "deny".
+    async fn post_respond(origin: &str, nonce: &str, index: u8) -> Result<(), String> {
+        let url = format!("{origin}/permission/{nonce}/respond");
+        let body_str = format!("{{\"index\":{index}}}");
+        let init = RequestInit::new();
+        init.set_method("POST");
+        let headers = Headers::new().map_err(|e| format!("{e:?}"))?;
+        headers
+            .append("Content-Type", "application/json")
+            .map_err(|e| format!("{e:?}"))?;
+        init.set_headers(&headers);
+        init.set_body(&JsValue::from_str(&body_str));
+        let response = js_fetch(&url, &init).await?;
+        if !response.ok() {
+            return Err(format!(
+                "POST /permission/{nonce}/respond → {}",
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Decode `ml-dsa-65:<hex>` from the gateway's permission message `user`
+    /// field into raw VK bytes. Returns `None` for unexpected formats or
+    /// odd-length hex.
+    fn vk_bytes_from_user_field(user: &str) -> Option<Vec<u8>> {
+        let hex = user.strip_prefix("ml-dsa-65:")?;
+        if hex.len() % 2 != 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let mut chars = hex.chars();
+        while let (Some(hi), Some(lo)) = (chars.next(), chars.next()) {
+            let hi = hi.to_digit(16)?;
+            let lo = lo.to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+        }
+        Some(out)
+    }
+
+    /// Decide whether to auto-respond to a pending permission prompt.
+    ///
+    /// Returns `Some(index)` where `index = 0` (accept) or `1` (deny),
+    /// or `None` if no automatic action should be taken (show the modal).
+    ///
+    /// Priority order (#149):
+    /// 1. Per-recipient saved decision (`permission_decisions` map in settings).
+    /// 2. `auto_accept_verified_contacts` AND the recipient is verified.
+    /// 3. No rule → `None`.
+    ///
+    /// `sender_vk_bytes`: raw ML-DSA-65 VK of the token sender.
+    /// `pending_recipient_vk_bytes`: VK bytes of currently pending recipients.
+    /// `user`: the `Signal<User>` to read identity settings from.
+    pub(crate) fn resolve_auto_response(
+        sender_vk_bytes: &[u8],
+        pending_recipient_vk_bytes: &[Vec<u8>],
+        user: dioxus::prelude::Signal<crate::app::User>,
+    ) -> Option<u8> {
+        use dioxus::prelude::ReadableExt;
+
+        // Identify which of the user's identities is doing the send.
+        let active_alias = {
+            let user_guard = user.read();
+            user_guard.logged_id().and_then(|id| {
+                if id.ml_dsa_vk_bytes() == sender_vk_bytes {
+                    Some(id.alias.to_string())
+                } else {
+                    None
+                }
+            })
+        };
+        let alias = active_alias?;
+        let prefs = crate::local_state::identity_settings_for(&alias).aft;
+
+        // Priority 1: per-recipient saved decision.
+        // `contact_by_vk` matches on the ML-DSA VK only (EK not available here).
+        for vk_bytes in pending_recipient_vk_bytes {
+            if let Some(contact) = address_book::contact_by_vk(vk_bytes) {
+                let fp = contact.fingerprint_full();
+                if let Some(decision) =
+                    crate::app::settings::resolve_permission_decision(&prefs, &fp, contact.verified)
+                {
+                    return Some(match decision {
+                        PermissionDecision::Accept => 0,
+                        PermissionDecision::Deny => 1,
+                    });
+                }
+            } else if prefs.auto_accept_verified_contacts {
+                // The VK might belong to one of the user's own identities
+                // (self-send). Own identities are implicitly verified.
+                let is_own = {
+                    let user_guard = user.read();
+                    user_guard
+                        .identities
+                        .iter()
+                        .any(|id| id.ml_dsa_vk_bytes() == vk_bytes.as_slice())
+                };
+                if is_own {
+                    return Some(0);
+                }
+            }
+        }
+        None
+    }
+
+    /// One tick of the permission pump.
+    ///
+    /// Fetches pending prompts, evaluates policy for each, and responds
+    /// automatically when the policy dictates. Nonces that have already been
+    /// seen (but had no saved policy) are skipped on subsequent ticks.
+    pub(crate) async fn tick(
+        origin: &str,
+        seen: &mut std::collections::HashSet<String>,
+        user: dioxus::prelude::Signal<crate::app::User>,
+    ) {
+        let prompts = match fetch_pending(origin).await {
+            Ok(p) => p,
+            Err(e) => {
+                crate::log::debug!("permission pump: GET pending failed: {e}");
+                return;
+            }
+        };
+
+        let pending_recipient_vk_bytes = crate::aft::AftRecords::peek_pending_recipient_vk_bytes();
+
+        for prompt in &prompts {
+            if seen.contains(&prompt.nonce) {
+                continue;
+            }
+
+            // Parse the sender's VK bytes out of the permission message.
+            let sender_vk_bytes = prompt
+                .message
+                .as_deref()
+                .and_then(|msg| serde_json::from_str::<TokenMsg>(msg).ok())
+                .and_then(|tm| vk_bytes_from_user_field(&tm.token.user));
+
+            let auto_index = match &sender_vk_bytes {
+                Some(vk_bytes) => {
+                    resolve_auto_response(vk_bytes, &pending_recipient_vk_bytes, user)
+                }
+                None => None,
+            };
+
+            if let Some(index) = auto_index {
+                match post_respond(origin, &prompt.nonce, index).await {
+                    Ok(()) => {
+                        crate::log::info(format!(
+                            "permission pump: auto-responded nonce={} index={index}",
+                            prompt.nonce
+                        ));
+                        seen.insert(prompt.nonce.clone());
+                        // Once a decision is applied, drain the pending
+                        // recipients so the next send starts fresh.
+                        crate::aft::AftRecords::drain_pending_recipient_vk_bytes();
+                    }
+                    Err(e) => {
+                        crate::log::error(
+                            format!(
+                                "permission pump: respond failed nonce={} err={e}",
+                                prompt.nonce
+                            ),
+                            None,
+                        );
+                    }
+                }
+            }
+            // If no auto-response, leave the prompt for the gateway shell
+            // to surface. We do not add to `seen` so it is re-evaluated
+            // on the next tick (policy prefs may change while modal is up).
+        }
+
+        // Prune nonces that no longer appear in the pending list (they were
+        // either handled by the shell modal or expired).
+        let current_nonces: std::collections::HashSet<String> =
+            prompts.iter().map(|p| p.nonce.clone()).collect();
+        seen.retain(|n| current_nonces.contains(n));
+    }
+
+    /// Spawn the permission pump as a `spawn_forever` background task.
+    ///
+    /// The task runs indefinitely, polling the gateway for pending permission
+    /// prompts. It is started once from `node_comms` after the WebSocket
+    /// connection is established. Under `no-sync` or non-WASM builds this
+    /// function does not exist (the caller is also `#[cfg(…)]`).
+    pub(crate) fn spawn(user: dioxus::prelude::Signal<crate::app::User>) {
+        let Some(origin) = gateway_origin() else {
+            crate::log::error("permission pump: could not derive gateway origin", None);
+            return;
+        };
+        dioxus::core::spawn_forever(async move {
+            let mut seen = std::collections::HashSet::<String>::new();
+            loop {
+                tick(&origin, &mut seen, user).await;
+                gloo_timers::future::sleep(std::time::Duration::from_millis(
+                    PUMP_INTERVAL_MS as u64,
+                ))
+                .await;
+            }
+        });
     }
 }
 

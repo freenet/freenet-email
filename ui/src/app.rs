@@ -649,7 +649,7 @@ impl User {
         }
     }
 
-    fn logged_id(&self) -> Option<&Identity> {
+    pub(crate) fn logged_id(&self) -> Option<&Identity> {
         self.active_id.and_then(|id| self.identities.get(id.0))
     }
 

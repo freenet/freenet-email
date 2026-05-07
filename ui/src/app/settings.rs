@@ -13,8 +13,11 @@
 //! ported in this pass; first cut is desktop-only.
 
 use dioxus::prelude::*;
+#[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
+use mail_local_state::IdentityAftPrefs;
 use mail_local_state::{
-    Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings, Theme,
+    Density, GlobalSettings, IdentityPrivacyPrefs, IdentitySettings, InboxSettings,
+    PermissionDecision, Theme,
 };
 
 use crate::app::User;
@@ -622,12 +625,39 @@ const TIER_ROWS: &[(&str, &str)] = &[
     ("Day365", "1 / year"),
 ];
 
+/// A helper that derives which `PermissionDecision` (if any) should be applied
+/// automatically for a recipient identified by `fingerprint_full` given the
+/// active identity's AFT preferences.
+///
+/// Returns `Some(Accept)` or `Some(Deny)` when a saved or policy-driven
+/// decision is available; `None` when the permission modal should be shown.
+///
+/// Priority order:
+/// 1. Per-recipient saved decision (`permission_decisions` map).
+/// 2. `auto_accept_verified_contacts` + `is_verified`.
+/// 3. No automatic decision → `None`.
+#[cfg(any(all(target_family = "wasm", feature = "use-node"), test))]
+pub(crate) fn resolve_permission_decision(
+    prefs: &IdentityAftPrefs,
+    fingerprint_full: &str,
+    is_verified: bool,
+) -> Option<PermissionDecision> {
+    if let Some(saved) = prefs.permission_decisions.get(fingerprint_full) {
+        return Some(*saved);
+    }
+    if prefs.auto_accept_verified_contacts && is_verified {
+        return Some(PermissionDecision::Accept);
+    }
+    None
+}
+
 #[allow(non_snake_case)]
 fn ScrAft() -> Element {
     let (alias_key, ident) = use_identity_settings();
     let aft_now = ident.aft.clone();
     let selected_tier = aft_now.required_tier.clone();
     let max_age_days = aft_now.max_age_days;
+    let auto_accept_verified = aft_now.auto_accept_verified_contacts;
     let actions = use_coroutine_handle::<crate::app::NodeAction>();
 
     // #85: dispatch a `ModifySettings` delta to the inbox contract so
@@ -681,6 +711,36 @@ fn ScrAft() -> Element {
         local_state::persist_identity_settings(alias_key_m.clone(), next.clone());
         push_policy(&alias_key_m, &next.aft.required_tier, parsed);
     };
+
+    // Toggle for auto-accept verified contacts (Part 3, #149).
+    let alias_key_av = alias_key.clone();
+    let ident_av = ident.clone();
+    let on_auto_accept_verified = move |_| {
+        let mut next = ident_av.clone();
+        next.aft.auto_accept_verified_contacts = !next.aft.auto_accept_verified_contacts;
+        local_state::persist_identity_settings(alias_key_av.clone(), next);
+    };
+
+    // Snapshot decisions so the list is stable while the component renders.
+    let decisions: Vec<(String, PermissionDecision)> = {
+        let mut v: Vec<_> = aft_now
+            .permission_decisions
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+
+    // Remove a saved decision for a specific fingerprint.
+    let alias_key_rm = alias_key.clone();
+    let ident_rm = ident.clone();
+    let on_remove_decision = move |fp: String| {
+        let mut next = ident_rm.clone();
+        next.aft.permission_decisions.remove(&fp);
+        local_state::persist_identity_settings(alias_key_rm.clone(), next);
+    };
+
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
@@ -733,6 +793,61 @@ fn ScrAft() -> Element {
                             onchange: on_max_age,
                         }
                     },
+                }
+            }
+            Card {
+                title: "Permission modal behaviour",
+                sub: "When sending mail, the Freenet gateway shows a permission prompt for each AFT token spend. These settings control when that prompt is skipped automatically.",
+                SettingRow {
+                    label: "Auto-accept token spending for verified contacts",
+                    help: "When on, sends to contacts you have verified (fingerprint confirmed) skip the permission modal entirely.",
+                    control: rsx! {
+                        Toggle {
+                            on: auto_accept_verified,
+                            ontoggle: on_auto_accept_verified,
+                        }
+                    },
+                }
+                if !decisions.is_empty() {
+                    div { style: "padding: 12px 16px 4px; border-top: 1px solid var(--line2);",
+                        div { style: "font-size: 11.5px; color: var(--ink3); margin-bottom: 8px;",
+                            "Saved per-recipient decisions"
+                        }
+                        for (fp, decision) in decisions.iter() {
+                            {
+                                let fp_clone = fp.clone();
+                                let on_rm = on_remove_decision.clone();
+                                let decision_label = match decision {
+                                    PermissionDecision::Accept => "always accept",
+                                    PermissionDecision::Deny => "always deny",
+                                };
+                                let decision_color = match decision {
+                                    PermissionDecision::Accept => "var(--green, #22c55e)",
+                                    PermissionDecision::Deny => "var(--red, #ef4444)",
+                                };
+                                rsx! {
+                                    div {
+                                        key: "{fp_clone}",
+                                        style: "display: flex; align-items: center; gap: 8px; padding: 4px 0;",
+                                        span {
+                                            style: "font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--ink2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                            "{fp_clone}"
+                                        }
+                                        span {
+                                            style: "font-size: 11px; color: {decision_color}; font-weight: 500; white-space: nowrap;",
+                                            "{decision_label}"
+                                        }
+                                        button {
+                                            class: "fm-btn-secondary",
+                                            style: "height: 22px; padding: 0 7px; font-size: 11px;",
+                                            onclick: move |_| on_rm(fp_clone.clone()),
+                                            "Remove"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1062,5 +1177,105 @@ fn ScrAdvanced() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prefs_default() -> IdentityAftPrefs {
+        IdentityAftPrefs::default()
+    }
+
+    const FP: &str = "abandon-ability-able-about-above-absent";
+
+    /// No saved decision + auto-accept OFF → `None` (show modal).
+    #[test]
+    fn no_policy_returns_none() {
+        let prefs = prefs_default();
+        assert_eq!(resolve_permission_decision(&prefs, FP, false), None,);
+    }
+
+    /// Saved Accept decision → always `Some(Accept)`, even if not verified.
+    #[test]
+    fn saved_accept_overrides_everything() {
+        let mut prefs = prefs_default();
+        prefs
+            .permission_decisions
+            .insert(FP.to_string(), PermissionDecision::Accept);
+        assert_eq!(
+            resolve_permission_decision(&prefs, FP, false),
+            Some(PermissionDecision::Accept),
+        );
+        // Even when auto-accept-verified is off.
+        assert_eq!(
+            resolve_permission_decision(&prefs, FP, true),
+            Some(PermissionDecision::Accept),
+        );
+    }
+
+    /// Saved Deny decision → `Some(Deny)`, even for a verified contact.
+    #[test]
+    fn saved_deny_overrides_auto_accept_verified() {
+        let mut prefs = prefs_default();
+        prefs.auto_accept_verified_contacts = true;
+        prefs
+            .permission_decisions
+            .insert(FP.to_string(), PermissionDecision::Deny);
+        assert_eq!(
+            resolve_permission_decision(&prefs, FP, true),
+            Some(PermissionDecision::Deny),
+        );
+    }
+
+    /// `auto_accept_verified_contacts` ON + verified → `Some(Accept)`.
+    #[test]
+    fn auto_accept_verified_returns_accept_for_verified() {
+        let mut prefs = prefs_default();
+        prefs.auto_accept_verified_contacts = true;
+        assert_eq!(
+            resolve_permission_decision(&prefs, FP, true),
+            Some(PermissionDecision::Accept),
+        );
+    }
+
+    /// `auto_accept_verified_contacts` ON + NOT verified → `None` (show modal).
+    #[test]
+    fn auto_accept_verified_returns_none_for_unverified() {
+        let mut prefs = prefs_default();
+        prefs.auto_accept_verified_contacts = true;
+        assert_eq!(resolve_permission_decision(&prefs, FP, false), None,);
+    }
+
+    /// Saved decision takes priority over `auto_accept_verified_contacts`.
+    #[test]
+    fn saved_decision_has_priority_over_auto_accept() {
+        let mut prefs = prefs_default();
+        prefs.auto_accept_verified_contacts = true;
+        prefs
+            .permission_decisions
+            .insert(FP.to_string(), PermissionDecision::Deny);
+        // Saved Deny wins even though auto-accept is on and contact is verified.
+        assert_eq!(
+            resolve_permission_decision(&prefs, FP, true),
+            Some(PermissionDecision::Deny),
+        );
+    }
+
+    /// Missing fingerprint in the decisions map still falls through to
+    /// `auto_accept_verified_contacts` logic.
+    #[test]
+    fn unknown_fingerprint_falls_through_to_auto_accept_policy() {
+        let mut prefs = prefs_default();
+        prefs.auto_accept_verified_contacts = true;
+        prefs
+            .permission_decisions
+            .insert("other-fp".to_string(), PermissionDecision::Deny);
+        // FP is not in the map → check auto_accept_verified.
+        assert_eq!(
+            resolve_permission_decision(&prefs, FP, true),
+            Some(PermissionDecision::Accept),
+        );
     }
 }

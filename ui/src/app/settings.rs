@@ -377,7 +377,6 @@ fn ScrAccount() -> Element {
         .unwrap_or_default();
 
     let (alias_key, ident) = use_identity_settings();
-    let display_name = ident.display_name.clone();
     let signature = ident.signature.clone();
     let auto_sign = ident.auto_sign;
     let last_backup_at = ident.last_backup_at;
@@ -389,13 +388,6 @@ fn ScrAccount() -> Element {
         None => "Never".to_string(),
     };
 
-    let alias_key_dn = alias_key.clone();
-    let ident_dn = ident.clone();
-    let on_display_name = move |ev: Event<FormData>| {
-        let mut next = ident_dn.clone();
-        next.display_name = ev.value();
-        local_state::persist_identity_settings(alias_key_dn.clone(), next);
-    };
     let alias_key_sig = alias_key.clone();
     let ident_sig = ident.clone();
     let on_signature = move |ev: Event<FormData>| {
@@ -469,18 +461,6 @@ fn ScrAccount() -> Element {
                     label: "Alias",
                     help: "The handle others type to reach you. Bound to this identity's keys; cannot be changed without rotating.",
                     control: rsx! { input { class: "fm-input mono", value: "{alias}", disabled: true, style: "width: 180px" } },
-                }
-                SettingRow {
-                    label: "Display name",
-                    help: "Shown next to your alias in recipients' inboxes. Plain text, no verification.",
-                    control: rsx! {
-                        input {
-                            class: "fm-input",
-                            value: "{display_name}",
-                            style: "width: 180px",
-                            oninput: on_display_name,
-                        }
-                    },
                 }
                 SettingRow {
                     label: "Signature",
@@ -560,8 +540,6 @@ fn ScrPrivacy() -> Element {
     let priv_now = ident.privacy.clone();
     let verify_on_send = priv_now.verify_on_send;
     let hide_unsigned = priv_now.hide_unsigned;
-    let pad_length = priv_now.pad_length;
-    let read_receipts = priv_now.read_receipts;
 
     let mk_toggle = move |mutate: fn(&mut IdentityPrivacyPrefs)| {
         let alias_key = alias_key.clone();
@@ -574,8 +552,6 @@ fn ScrPrivacy() -> Element {
     };
     let on_verify = mk_toggle(|p| p.verify_on_send = !p.verify_on_send);
     let on_hide_unsigned = mk_toggle(|p| p.hide_unsigned = !p.hide_unsigned);
-    let on_pad = mk_toggle(|p| p.pad_length = !p.pad_length);
-    let on_receipts = mk_toggle(|p| p.read_receipts = !p.read_receipts);
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
@@ -591,20 +567,6 @@ fn ScrPrivacy() -> Element {
                     label: "Hide unsigned messages",
                     help: "Move messages with no ML-DSA signature directly to a quarantine folder.",
                     control: rsx! { Toggle { on: hide_unsigned, ontoggle: on_hide_unsigned } },
-                }
-            }
-            Card {
-                title: "Linkability",
-                sub: "Information that reveals patterns across your identities.",
-                SettingRow {
-                    label: "Share read receipts",
-                    help: "Senders see when you opened the message. Off by default; off is the unlinkable option.",
-                    control: rsx! { Toggle { on: read_receipts, ontoggle: on_receipts } },
-                }
-                SettingRow {
-                    label: "Pad message length",
-                    help: "Round ciphertext size to fixed buckets so observers can't infer content size. Adds ~5% bandwidth.",
-                    control: rsx! { Toggle { on: pad_length, ontoggle: on_pad } },
                 }
             }
         }
@@ -666,9 +628,6 @@ fn ScrAft() -> Element {
     let aft_now = ident.aft.clone();
     let selected_tier = aft_now.required_tier.clone();
     let max_age_days = aft_now.max_age_days;
-    let allow_known = aft_now.allow_known;
-    let allow_anon = aft_now.allow_anon;
-    let bounce = aft_now.bounce_message.clone();
     let actions = use_coroutine_handle::<crate::app::NodeAction>();
 
     // #85: dispatch a `ModifySettings` delta to the inbox contract so
@@ -722,28 +681,6 @@ fn ScrAft() -> Element {
         local_state::persist_identity_settings(alias_key_m.clone(), next.clone());
         push_policy(&alias_key_m, &next.aft.required_tier, parsed);
     };
-    let alias_key_k = alias_key.clone();
-    let ident_k = ident.clone();
-    let on_allow_known = move |_| {
-        let mut next = ident_k.clone();
-        next.aft.allow_known = !next.aft.allow_known;
-        local_state::persist_identity_settings(alias_key_k.clone(), next);
-    };
-    let alias_key_a = alias_key.clone();
-    let ident_a = ident.clone();
-    let on_allow_anon = move |_| {
-        let mut next = ident_a.clone();
-        next.aft.allow_anon = !next.aft.allow_anon;
-        local_state::persist_identity_settings(alias_key_a.clone(), next);
-    };
-    let alias_key_b = alias_key.clone();
-    let ident_b = ident.clone();
-    let on_bounce = move |ev: Event<FormData>| {
-        let mut next = ident_b.clone();
-        next.aft.bounce_message = ev.value();
-        local_state::persist_identity_settings(alias_key_b.clone(), next);
-    };
-
     rsx! {
         div { class: "fm-set-inner",
             p { class: "fm-set-lede",
@@ -786,31 +723,6 @@ fn ScrAft() -> Element {
                         value: "{max_age_days}",
                         onchange: on_max_age,
                     }
-                }
-            }
-            Card {
-                title: "Trust overrides",
-                SettingRow {
-                    label: "Allow lower tiers from known contacts",
-                    help: "People in your address book bypass the tier floor.",
-                    control: rsx! { Toggle { on: allow_known, ontoggle: on_allow_known } },
-                }
-                SettingRow {
-                    label: "Allow no-tier (anonymous)",
-                    help: "Off by default. Recommended only for public dropboxes.",
-                    control: rsx! { Toggle { on: allow_anon, ontoggle: on_allow_anon } },
-                }
-                SettingRow {
-                    label: "Bounce message",
-                    help: "Returned to senders below your floor. They see this; you don't.",
-                    stacked: true,
-                    control: rsx! {
-                        textarea {
-                            class: "fm-textarea",
-                            value: "{bounce}",
-                            oninput: on_bounce,
-                        }
-                    },
                 }
             }
         }

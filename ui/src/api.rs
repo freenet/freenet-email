@@ -692,7 +692,6 @@ pub(crate) async fn node_comms(
     user: Signal<crate::app::User>,
     inboxes: crate::app::InboxesData,
     ab_gen: crate::app::AddressBookGen,
-    _toast: crate::toast::ToastQueue,
 ) {
     // todo don't unwrap inside this function, propagate errors to the UI somehow
     use freenet_email_inbox::Inbox as StoredInbox;
@@ -780,7 +779,7 @@ pub(crate) async fn node_comms(
     // The toast signal is passed so the pump can notify the user when an
     // AFT token is spent automatically (#159).
     #[cfg(target_family = "wasm")]
-    permission_pump::spawn(user, toast);
+    permission_pump::spawn(user);
 
     static IDENTITIES_KEY: OnceLock<DelegateKey> = OnceLock::new();
     IDENTITIES_KEY.set(identities_key.clone()).unwrap();
@@ -1945,7 +1944,7 @@ pub(crate) async fn node_comms(
 /// doesn't block the request/response pipeline.
 #[cfg(all(target_family = "wasm", feature = "use-node"))]
 pub(crate) mod permission_pump {
-    use dioxus::prelude::{ReadableExt, WritableExt};
+    use dioxus::prelude::ReadableExt;
     use mail_local_state::PermissionDecision;
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen::JsValue;
@@ -2145,7 +2144,6 @@ pub(crate) mod permission_pump {
         origin: &str,
         seen: &mut std::collections::HashSet<String>,
         user: dioxus::prelude::Signal<crate::app::User>,
-        mut toast: dioxus::prelude::Signal<Option<String>>,
     ) {
         let prompts = match fetch_pending(origin).await {
             Ok(p) => p,
@@ -2200,17 +2198,7 @@ pub(crate) mod permission_pump {
                             .unwrap_or_else(|| "a contact".to_string());
                         let action_label = if index == 0 { "approved" } else { "denied" };
                         let msg = format!("Token {action_label} for {recipient_label}");
-                        toast.set(Some(msg));
-                        // Auto-clear the toast after 2.5 s to mirror the
-                        // app-wide `spawn_toast_clear` convention.
-                        let mut toast_clear = toast;
-                        dioxus::core::spawn_forever(async move {
-                            gloo_timers::future::sleep(std::time::Duration::from_millis(2500))
-                                .await;
-                            if toast_clear.read().is_some() {
-                                toast_clear.set(None);
-                            }
-                        });
+                        crate::toast::push_toast(msg, crate::toast::ToastLevel::Info);
                     }
                     Err(e) => {
                         crate::log::error(
@@ -2242,12 +2230,9 @@ pub(crate) mod permission_pump {
     /// connection is established. Under `no-sync` or non-WASM builds this
     /// function does not exist (the caller is also `#[cfg(…)]`).
     ///
-    /// `toast` is the app-wide toast signal; the pump writes to it whenever
-    /// it auto-responds to a pending permission prompt (#159).
-    pub(crate) fn spawn(
-        user: dioxus::prelude::Signal<crate::app::User>,
-        toast: dioxus::prelude::Signal<Option<String>>,
-    ) {
+    /// When the pump auto-responds to a pending permission prompt it emits a
+    /// toast via [`crate::toast::push_toast`] (#159).
+    pub(crate) fn spawn(user: dioxus::prelude::Signal<crate::app::User>) {
         let Some(origin) = gateway_origin() else {
             crate::log::error("permission pump: could not derive gateway origin", None);
             return;
@@ -2255,7 +2240,7 @@ pub(crate) mod permission_pump {
         dioxus::core::spawn_forever(async move {
             let mut seen = std::collections::HashSet::<String>::new();
             loop {
-                tick(&origin, &mut seen, user, toast).await;
+                tick(&origin, &mut seen, user).await;
                 gloo_timers::future::sleep(std::time::Duration::from_millis(
                     PUMP_INTERVAL_MS as u64,
                 ))

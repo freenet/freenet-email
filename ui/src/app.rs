@@ -157,10 +157,11 @@ pub(crate) fn app() -> Element {
 
     #[cfg(all(feature = "use-node", not(feature = "no-sync")))]
     {
+        let _ = toast;
         let _sync: Coroutine<NodeAction> = use_coroutine(move |rx| {
             let login_controller = login_controller;
             let user = user;
-            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen, toast)
+            let fut = crate::api::node_comms(rx, login_controller, user, inbox_data, ab_gen)
                 .map(|_| Ok(JsValue::NULL));
             let _ = wasm_bindgen_futures::future_to_promise(fut);
             async {}.boxed_local()

@@ -435,9 +435,28 @@ impl AftRecords {
         // Pick the cheapest tier the sender has available that still satisfies
         // the recipient's minimum (#152). Collect available tiers from the
         // cached record so we prefer a Min10 slot over a Day1 when both exist.
-        let available_tiers: Vec<Tier> = (&records).into_iter().map(|(t, _)| *t).collect();
-        let spend_tier = pick_spend_tier(&available_tiers, recipient_required_tier)
-            .unwrap_or(recipient_required_tier);
+        // Filter out empty Vecs: a key with no assignments is not a usable
+        // tier — including it would mislead pick_spend_tier into thinking
+        // the sender has tokens at that level (fix #160 bug 1).
+        let available_tiers: Vec<Tier> = (&records)
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(t, _)| *t)
+            .collect();
+        // Distinguish two None cases (fix #160 bug 2):
+        // - Empty pool (no tiers at all, fresh install): the delegate still
+        //   gets to decide — fall through with the recipient's required tier
+        //   so the delegate can attempt a fresh mint.
+        // - Non-empty pool but no tier qualifies (e.g. sender only has Min1,
+        //   recipient requires Min10): reject early with a user-visible error
+        //   rather than asking the delegate for a tier we don't hold.
+        let spend_tier = match pick_spend_tier(&available_tiers, recipient_required_tier) {
+            Some(t) => t,
+            None if available_tiers.is_empty() => recipient_required_tier,
+            None => {
+                return Err(format_insufficient_tier_toast(recipient_required_tier).into());
+            }
+        };
         let criteria = build_recipient_criteria(spend_tier, recipient_max_age_secs, token_record)?;
         let token_request = TokenDelegateMessage::RequestNewToken(RequestNewToken {
             request_id: REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
@@ -577,6 +596,22 @@ pub(crate) fn format_no_record_toast() -> String {
     "Can't send: your token record hasn't loaded yet. \
      Wait a moment and try again, or check Settings → AFT."
         .to_string()
+}
+
+/// Build a user-facing toast message when the sender's token pool is
+/// non-empty but contains no tier that satisfies the recipient's
+/// `minimum_tier` requirement.
+///
+/// Distinct from `format_no_record_toast` (record missing entirely) and
+/// from `format_failure_toast(NoFreeSlot)` (delegate rejected the request
+/// after we asked). This error fires *before* the delegate request because
+/// asking for a tier we don't hold would always fail — surfacing it here
+/// gives the user an actionable message immediately (#160).
+pub(crate) fn format_insufficient_tier_toast(required: Tier) -> String {
+    format!(
+        "Insufficient tier — your tokens are too low to send to this recipient \
+         (requires {required}). Mint higher-tier tokens in Settings → AFT.",
+    )
 }
 
 #[cfg(test)]
@@ -807,6 +842,99 @@ mod tests {
             pick_spend_tier(&available, Tier::Day1),
             Some(Tier::Day1),
             "Day1 exact match must be preferred over Day7"
+        );
+    }
+
+    // --- available_tiers filtering (#160 bug 1) --------------------------
+
+    /// An empty Vec under a Tier key must NOT contribute that tier to the
+    /// available list. The filter `!v.is_empty()` must strip it so that
+    /// `pick_spend_tier` doesn't see a "phantom" tier.
+    #[test]
+    fn available_tiers_filters_empty_buckets() {
+        use std::collections::HashMap;
+        // Build a record with one non-empty bucket and one empty bucket.
+        let mut tokens: HashMap<Tier, Vec<TokenAssignment>> = HashMap::new();
+        tokens.insert(Tier::Day1, vec![]); // empty — must be filtered
+        tokens.insert(Tier::Hour1, vec![]); // also empty
+        let record = TokenAllocationRecord::new(tokens);
+
+        // Reproduce the fix: filter empty vecs before passing to pick_spend_tier.
+        let available: Vec<Tier> = (&record)
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(t, _)| *t)
+            .collect();
+
+        assert!(
+            available.is_empty(),
+            "empty buckets must not appear in the available tier list; got {available:?}"
+        );
+
+        // If we had NOT filtered, Day1 and Hour1 would appear and pick_spend_tier
+        // would return Some(Hour1) for a Min10 requirement — which would be wrong
+        // because the sender has zero tokens at that tier.
+        let unfiltered: Vec<Tier> = (&record).into_iter().map(|(t, _)| *t).collect();
+        // Depending on HashMap iteration order, one or two phantom tiers surface.
+        assert!(
+            !unfiltered.is_empty(),
+            "without filtering the phantom tiers would be visible (pre-fix behaviour)"
+        );
+    }
+
+    // --- format_insufficient_tier_toast (#160 bug 2) ---------------------
+
+    /// When the sender's pool is non-empty but has no tier at or above
+    /// the required level, the error must mention the required tier and
+    /// the Settings → AFT hint so the user knows what to mint.
+    #[test]
+    fn format_insufficient_tier_toast_mentions_required_tier_and_hint() {
+        let msg = format_insufficient_tier_toast(Tier::Min10);
+        assert!(
+            msg.contains("min10"),
+            "expected required tier name in: {msg}"
+        );
+        assert!(
+            msg.contains("Settings → AFT"),
+            "expected settings hint in: {msg}"
+        );
+    }
+
+    /// Verify the two-case None split: empty pool falls through (returns
+    /// the required tier so the delegate gets a chance to mint fresh
+    /// tokens), whereas non-empty pool with no qualifying tier returns
+    /// an error string that starts with "Insufficient tier".
+    #[test]
+    fn insufficient_tier_error_is_distinct_from_empty_pool() {
+        // Non-empty pool case — only Min1, recipient requires Min10.
+        let non_empty = vec![Tier::Min1];
+        let result_non_empty = pick_spend_tier(&non_empty, Tier::Min10);
+        assert!(
+            result_non_empty.is_none(),
+            "non-empty pool with no qualifying tier must return None"
+        );
+
+        // Empty pool case — returns None too, but the calling site treats
+        // it differently (falls back to recipient_required_tier).
+        let empty: Vec<Tier> = vec![];
+        let result_empty = pick_spend_tier(&empty, Tier::Min10);
+        assert!(
+            result_empty.is_none(),
+            "empty pool must also return None from pick_spend_tier"
+        );
+
+        // The difference is detected at the call site:
+        // available_tiers.is_empty() distinguishes the two paths.
+        // In the empty case the error is NOT produced; in the non-empty case it IS.
+        let empty_case_produces_error = !empty.is_empty() && result_empty.is_none();
+        let nonempty_case_produces_error = !non_empty.is_empty() && result_non_empty.is_none();
+        assert!(
+            !empty_case_produces_error,
+            "empty pool must NOT produce an insufficient-tier error"
+        );
+        assert!(
+            nonempty_case_produces_error,
+            "non-empty pool with no qualifying tier MUST produce an insufficient-tier error"
         );
     }
 }

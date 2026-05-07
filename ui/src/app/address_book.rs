@@ -74,7 +74,9 @@ pub struct ContactCard {
     /// Encoded into the recipient's `InboxParams`, so the contract id
     /// hashes over this value — sending under a different tier is
     /// rejected by `verify_token_policy` in the inbox contract.
-    /// Defaults to `Tier::Day1` when missing so v1 cards keep working.
+    /// Defaults to `Tier::Min10` when missing so v1 cards (which omit
+    /// this field) use the same tier as freshly-created inboxes, avoiding
+    /// a silent rejection when the sender mints at an outdated default.
     #[serde(default = "default_tier")]
     pub required_tier: Tier,
     /// Recipient's anti-flood policy: max age (seconds) the AFT delegate
@@ -84,8 +86,12 @@ pub struct ContactCard {
     pub max_age_secs: u64,
 }
 
+/// Default AFT tier for v1 contact cards that pre-date the `required_tier`
+/// field. Must match `IdentityAftPrefs::default().required_tier` so that a
+/// v1 card for a freshly-created inbox does not mint at an outdated tier and
+/// get silently rejected by `verify_token_policy` in the inbox contract.
 fn default_tier() -> Tier {
-    Tier::Day1
+    Tier::Min10
 }
 
 fn default_max_age_secs() -> u64 {
@@ -529,6 +535,8 @@ mod tests {
 
     /// Pre-#85 v1 cards lacked `required_tier` and `max_age_secs`. Decode
     /// must default-fill those fields so existing imports still work.
+    /// The default tier is now `Min10` (matching freshly-created inboxes)
+    /// so v1 card holders don't mint at `Day1` and get rejected.
     #[test]
     fn contact_card_v1_decodes_with_default_policy() {
         let vk: Vec<u8> = vec![1u8; 10];
@@ -543,8 +551,43 @@ mod tests {
         let bytes = serde_json::to_vec(&v1_json).unwrap();
         let encoded = format!("contact://{}", B64.encode(&bytes));
         let decoded = ContactCard::decode(&encoded).expect("v1 card decodes");
-        assert_eq!(decoded.required_tier, Tier::Day1);
+        assert_eq!(decoded.required_tier, Tier::Min10);
         assert_eq!(decoded.max_age_secs, DEFAULT_MAX_AGE_SECS);
+    }
+
+    /// `default_tier()` must match `IdentityAftPrefs::default().required_tier` so
+    /// that a freshly-created inbox and a v1 contact card for that inbox agree on
+    /// the required AFT tier. A mismatch would cause the sender to mint at the
+    /// wrong tier and get rejected by `verify_token_policy` in the inbox contract.
+    #[test]
+    fn default_tier_matches_aft_prefs_default() {
+        use mail_local_state::IdentityAftPrefs;
+        // IdentityAftPrefs uses String; parse the tier name for comparison.
+        let prefs_tier_str = IdentityAftPrefs::default().required_tier;
+        let prefs_tier: Tier = match prefs_tier_str.as_str() {
+            "Min1" => Tier::Min1,
+            "Min5" => Tier::Min5,
+            "Min10" => Tier::Min10,
+            "Min30" => Tier::Min30,
+            "Hour1" => Tier::Hour1,
+            "Hour3" => Tier::Hour3,
+            "Hour6" => Tier::Hour6,
+            "Hour12" => Tier::Hour12,
+            "Day1" => Tier::Day1,
+            "Day7" => Tier::Day7,
+            "Day15" => Tier::Day15,
+            "Day30" => Tier::Day30,
+            "Day90" => Tier::Day90,
+            "Day180" => Tier::Day180,
+            "Day365" => Tier::Day365,
+            other => panic!("unrecognised tier from IdentityAftPrefs::default(): {other}"),
+        };
+        assert_eq!(
+            default_tier(),
+            prefs_tier,
+            "ContactCard v1 back-compat default tier must match the AFT prefs default \
+             so freshly-created inboxes accept tokens minted from v1 cards",
+        );
     }
 
     fn make_contact(alias: &str, vk: u8, ek: u8) -> Contact {

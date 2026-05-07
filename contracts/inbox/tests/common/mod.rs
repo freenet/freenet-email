@@ -97,12 +97,18 @@ pub fn make_settings_with_bypass(
 }
 
 /// Build a `Message` carrying the given sender verifying key but NO valid
-/// token. Used by verified-bypass tests where the sender skips minting.
+/// token. The message is signed by `sender_sk` over `content` so that the
+/// verified-sender bypass path — which requires a valid ML-DSA-65 detached
+/// signature — accepts it.
+///
+/// Pass the signing key whose verifying key bytes are in `sender_vk_bytes`
+/// (i.e. `MlDsaKeypair::verifying_key(sender_sk).encode().to_vec()`).
 pub fn make_message_no_token(
     content: Vec<u8>,
     assignment_hash: [u8; 32],
     sender_vk_bytes: Vec<u8>,
     token_record_id: ContractInstanceId,
+    sender_sk: &MlDsaSigningKey<MlDsa65>,
 ) -> freenet_email_inbox::Message {
     use chrono::Utc;
     use freenet_aft_interface::TokenAssignment;
@@ -117,11 +123,15 @@ pub fn make_message_no_token(
         assignment_hash,
         token_record: token_record_id,
     };
+    // Sign the content (ciphertext blob) with the sender's key.
+    // The contract verifies this on the bypass path via verify_sender_signature.
+    let sig: ml_dsa::Signature<MlDsa65> = MlDsaSigner::sign(sender_sk, &content);
+    let signature_bytes: Vec<u8> = sig.encode().to_vec();
     freenet_email_inbox::Message {
         content,
         token_assignment: dummy_assignment,
         sender_vk: sender_vk_bytes,
-        signature: Vec::new(),
+        signature: signature_bytes,
     }
 }
 

@@ -14,12 +14,12 @@ use chrono::{Duration, Utc};
 use common::{
     add_messages_delta, assignment_hash_for, fixed_valid_slot, inbox_verifying_key,
     make_inbox_keypair, make_inbox_state, make_inbox_value, make_message, make_message_no_token,
-    make_params, make_settings_with_bypass, make_settings_with_policy, make_token_assignment,
-    make_token_generator_keypair, make_token_record, modify_settings_delta, related_state_update,
-    token_record_id_for,
+    make_params, make_settings_with_bypass, make_settings_with_bypass_multi,
+    make_settings_with_policy, make_token_assignment, make_token_generator_keypair,
+    make_token_record, modify_settings_delta, related_state_update, token_record_id_for,
 };
 use freenet_aft_interface::Tier;
-use freenet_email_inbox::{Inbox, InboxSettings};
+use freenet_email_inbox::{Inbox, InboxSettings, MAX_VERIFIED_SENDERS};
 use freenet_stdlib::prelude::{
     ContractInterface, RelatedContracts, State, UpdateModification, ValidateResult,
 };
@@ -442,6 +442,7 @@ fn verified_bypass_on_accepts_message_without_token() {
         assignment_hash,
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
 
     let settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes);
@@ -488,6 +489,7 @@ fn verified_bypass_on_but_unverified_sender_still_requires_token() {
         assignment_hash,
         unverified_vk_bytes,
         token_record_id,
+        &unverified_sk,
     );
 
     // Bypass on, but for `other_vk_bytes` — not for the actual sender.
@@ -535,6 +537,7 @@ fn verified_bypass_off_requires_token_even_for_verified_sender() {
         assignment_hash,
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
 
     // Verified sender is in the set, but bypass is OFF.
@@ -605,6 +608,7 @@ fn verified_bypass_mixed_batch_verified_and_unverified() {
         assignment_hash_for(b"mixed-verified-msg"),
         verified_vk_bytes.clone(),
         token_record_id,
+        &verified_sk,
     );
     // Unverified message — carries a real token.
     let unverified_assignment = make_token_assignment(
@@ -672,11 +676,13 @@ fn verified_bypass_with_invalid_token_still_accepted_via_bypass() {
     let assignment_hash = assignment_hash_for(b"bypass-with-bad-token-msg");
 
     // Message with zeroed (invalid) token bytes but matching VK in the bypass set.
+    // The sender provides a valid detached sig so verify_sender_signature passes.
     let message = make_message_no_token(
         b"verified with garbage token".to_vec(),
         assignment_hash,
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
 
     let settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes);
@@ -724,6 +730,7 @@ fn unverified_sender_with_invalid_token_rejected_even_with_bypass_on() {
         assignment_hash,
         unverified_vk_bytes,
         token_record_id,
+        &unverified_sk,
     );
     // Provide a real-but-mismatched token record so the missing-record gate
     // doesn't fire first. We want to reach the token-validity rejection.
@@ -775,6 +782,7 @@ fn toggle_bypass_off_mid_stream_rejects_subsequent_tokenless_message() {
         assignment_hash_for(b"toggle-off-msg1"),
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
     let after_msg1 = unwrap_valid(
         Inbox::update_state(
@@ -812,6 +820,7 @@ fn toggle_bypass_off_mid_stream_rejects_subsequent_tokenless_message() {
         assignment_hash_for(b"toggle-off-msg2"),
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
     // Provide a record so the missing-related gate doesn't trigger.
     let (gen_sk, gen_vk_bytes) = make_token_generator_keypair();
@@ -868,6 +877,7 @@ fn add_to_verified_senders_mid_stream_allows_bypass() {
         assignment_hash_for(b"add-set-msg1"),
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
     let dummy_assignment = make_token_assignment(
         &gen_sk,
@@ -908,6 +918,7 @@ fn add_to_verified_senders_mid_stream_allows_bypass() {
         assignment_hash_for(b"add-set-msg2"),
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
     let modification = Inbox::update_state(params, after_add, vec![add_messages_delta(vec![msg2])])
         .expect("after adding VK, tokenless message must succeed");
@@ -946,6 +957,7 @@ fn remove_from_verified_senders_mid_stream_revokes_bypass() {
         assignment_hash_for(b"remove-set-msg1"),
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
     let after_msg1 = unwrap_valid(
         Inbox::update_state(
@@ -978,6 +990,7 @@ fn remove_from_verified_senders_mid_stream_revokes_bypass() {
         assignment_hash_for(b"remove-set-msg2"),
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
     let dummy_assignment = make_token_assignment(
         &gen_sk,
@@ -1023,6 +1036,7 @@ fn empty_verified_senders_with_bypass_on_rejects_tokenless_message() {
         assignment_hash,
         sender_vk_bytes,
         token_record_id,
+        &sender_sk,
     );
 
     // Bypass ON but verified_senders is empty.
@@ -1127,6 +1141,7 @@ fn bypass_message_replay_is_deduplicated() {
         assignment_hash,
         sender_vk_bytes.clone(),
         token_record_id,
+        &sender_sk,
     );
 
     let settings = make_settings_with_bypass(Tier::Min10, sender_vk_bytes);
@@ -1157,26 +1172,75 @@ fn bypass_message_replay_is_deduplicated() {
     );
 }
 
-/// Verified sender with WRONG signature: the bypass path grants token-free
-/// entry only when the sender's *VK is in the allow-list*; a forged VK (valid
-/// VK bytes in the message, but the message is not signed by the corresponding
-/// key) is a different identity and must not bypass.
+/// After fix for PR #157: bypass path requires a valid ML-DSA-65 sender
+/// signature over the message content. An attacker who copies a verified VK
+/// into their `sender_vk` field but cannot sign with the corresponding key
+/// is rejected — the bypass is now signature-based, not membership-based alone.
 ///
-/// In the current wire format the inbox contract stores the raw `sender_vk`
-/// bytes on-chain and does not independently verify the detached ML-DSA
-/// signature over the ciphertext (that check happens in the UI on decryption).
-/// What the contract *does* check is whether the `sender_vk` field in the
-/// incoming `Message` is present in `verified_senders`. An attacker who copies
-/// the victim's VK bytes into their `sender_vk` field but signs nothing
-/// meaningful will still get the bypass because the contract only checks VK
-/// membership, not signature validity.
-///
-/// This test pins the current contract behavior: it documents that the bypass
-/// is membership-based, not signature-based, and exists so any future
-/// strengthening of this check (adding a sig-over-content verification step
-/// to the contract) is explicitly visible as a test change.
+/// This test was previously named
+/// `forged_sender_vk_gets_bypass_because_contract_checks_membership_not_sig`
+/// and asserted acceptance (the security regression). It is now inverted to
+/// confirm the fix: forged VK with no valid content signature → REJECTED.
 #[test]
-fn forged_sender_vk_gets_bypass_because_contract_checks_membership_not_sig() {
+fn bypass_rejects_unsigned_or_missigned_messages() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    // Legitimate sender: their VK is in the bypass allow-list.
+    let _legit_sk = make_inbox_keypair();
+    let legit_vk = inbox_verifying_key(&_legit_sk);
+    let legit_vk_bytes = legit_vk.encode().to_vec();
+
+    // Attacker has their OWN keypair but copies legit_vk_bytes into sender_vk.
+    let attacker_sk = make_inbox_keypair();
+
+    let token_record_id = token_record_id_for(b"forged-vk-record");
+    let content = b"content from attacker".to_vec();
+    let assignment_hash = assignment_hash_for(b"forged-vk-msg");
+
+    // Build the forged message: sender_vk = legit VK bytes, but signature is
+    // produced by the attacker's key (does not match legit_vk_bytes).
+    use chrono::Utc;
+    use freenet_aft_interface::TokenAssignment;
+    let dummy_assignment = TokenAssignment {
+        tier: freenet_aft_interface::Tier::Min10,
+        time_slot: Utc::now(),
+        generator: vec![0u8; 1952],
+        signature: vec![0u8; 3309],
+        assignment_hash,
+        token_record: token_record_id,
+    };
+    let attacker_sig: ml_dsa::Signature<ml_dsa::MlDsa65> =
+        ml_dsa::signature::Signer::sign(&attacker_sk, content.as_slice());
+    let forged_message = freenet_email_inbox::Message {
+        content,
+        token_assignment: dummy_assignment,
+        sender_vk: legit_vk_bytes.clone(), // attacker puts legit VK bytes here
+        signature: attacker_sig.encode().to_vec(), // but signs with their own key
+    };
+
+    let settings = make_settings_with_bypass(Tier::Min10, legit_vk_bytes);
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
+
+    // Contract must reject: signature doesn't verify against sender_vk.
+    let result = Inbox::update_state(
+        params,
+        initial_state,
+        vec![add_messages_delta(vec![forged_message])],
+    );
+    assert!(
+        result.is_err(),
+        "bypass must reject a message whose signature does not verify against sender_vk; \
+         forged VK + attacker-signed content must be rejected"
+    );
+}
+
+/// Negative test: a message with a completely empty signature on the bypass
+/// path is also rejected. This ensures `signature: vec![]` — which was the
+/// previous placeholder used by `make_message_no_token` — is no longer accepted.
+#[test]
+fn bypass_rejects_forged_signature() {
     let owner_sk = make_inbox_keypair();
     let owner_vk = inbox_verifying_key(&owner_sk);
     let params = make_params(&owner_vk);
@@ -1186,31 +1250,119 @@ fn forged_sender_vk_gets_bypass_because_contract_checks_membership_not_sig() {
     let legit_vk = inbox_verifying_key(&legit_sk);
     let legit_vk_bytes = legit_vk.encode().to_vec();
 
-    let token_record_id = token_record_id_for(b"forged-vk-record");
+    let token_record_id = token_record_id_for(b"empty-sig-record");
+    let content = b"attacker content with empty sig".to_vec();
+    let assignment_hash = assignment_hash_for(b"empty-sig-msg");
 
-    // Attacker copies legit_vk_bytes into their message but sends it
-    // without a valid content signature.  The sender_vk field is set to
-    // legit_vk_bytes (copied), matching the bypass set.
-    let message = make_message_no_token(
-        b"content from attacker".to_vec(),
-        assignment_hash_for(b"forged-vk-msg"),
-        legit_vk_bytes.clone(), // attacker puts legit VK bytes here
-        token_record_id,
-    );
+    // Build a message with legit VK bytes but empty (zero-length) signature.
+    use chrono::Utc;
+    use freenet_aft_interface::TokenAssignment;
+    let dummy_assignment = TokenAssignment {
+        tier: freenet_aft_interface::Tier::Min10,
+        time_slot: Utc::now(),
+        generator: vec![0u8; 1952],
+        signature: vec![0u8; 3309],
+        assignment_hash,
+        token_record: token_record_id,
+    };
+    let message_no_sig = freenet_email_inbox::Message {
+        content,
+        token_assignment: dummy_assignment,
+        sender_vk: legit_vk_bytes.clone(),
+        signature: Vec::new(), // no signature at all
+    };
 
     let settings = make_settings_with_bypass(Tier::Min10, legit_vk_bytes);
     let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), settings);
 
-    // The contract accepts the message because it only checks VK membership.
-    // This test exists to document (and pin) this known limitation.
-    let modification = Inbox::update_state(
+    let result = Inbox::update_state(
         params,
         initial_state,
-        vec![add_messages_delta(vec![message])],
+        vec![add_messages_delta(vec![message_no_sig])],
     );
     assert!(
-        modification.is_ok(),
-        "current contract accepts bypass based on VK membership alone (known limitation)"
+        result.is_err(),
+        "bypass must reject a message with sender_vk set but an empty signature"
+    );
+}
+
+// ─── #157 security fixes: MAX_VERIFIED_SENDERS cap ───────────────────────
+
+/// `ModifySettings` with `verified_senders.len() > MAX_VERIFIED_SENDERS` is
+/// rejected by `can_update_settings` before signature verification.
+#[test]
+fn modify_settings_rejects_oversized_verified_senders() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), InboxSettings::default());
+
+    // Build MAX_VERIFIED_SENDERS + 1 fake VK byte vectors (each 1952 bytes of zeros
+    // with a unique first byte so they're distinct). The content doesn't need to
+    // be valid ML-DSA-65 keys — the cap check fires before any key decode.
+    let too_many_vks: Vec<Vec<u8>> = (0..=(MAX_VERIFIED_SENDERS as u64))
+        .map(|i| {
+            let mut v = vec![0u8; 1952];
+            // Make each entry unique by embedding the index in the first 8 bytes.
+            v[0..8].copy_from_slice(&i.to_le_bytes());
+            v
+        })
+        .collect();
+
+    let oversized_settings = make_settings_with_bypass_multi(Tier::Min10, too_many_vks);
+    assert!(
+        oversized_settings.verified_senders.len() > MAX_VERIFIED_SENDERS,
+        "test setup: verified_senders must exceed the cap"
+    );
+
+    let result = Inbox::update_state(
+        params,
+        initial_state,
+        vec![modify_settings_delta(&owner_sk, oversized_settings)],
+    );
+    assert!(
+        result.is_err(),
+        "ModifySettings with verified_senders.len() > MAX_VERIFIED_SENDERS must be rejected; \
+         got {result:?}"
+    );
+}
+
+/// `ModifySettings` with exactly `MAX_VERIFIED_SENDERS` entries is accepted.
+#[test]
+fn modify_settings_accepts_verified_senders_at_cap() {
+    let owner_sk = make_inbox_keypair();
+    let owner_vk = inbox_verifying_key(&owner_sk);
+    let params = make_params(&owner_vk);
+
+    let initial_state = make_inbox_state(&owner_sk, vec![], Utc::now(), InboxSettings::default());
+
+    // Exactly MAX_VERIFIED_SENDERS entries — at the limit, not over it.
+    let at_cap_vks: Vec<Vec<u8>> = (0..MAX_VERIFIED_SENDERS as u64)
+        .map(|i| {
+            let mut v = vec![0u8; 1952];
+            v[0..8].copy_from_slice(&i.to_le_bytes());
+            v
+        })
+        .collect();
+
+    let at_cap_settings = make_settings_with_bypass_multi(Tier::Min10, at_cap_vks);
+    assert_eq!(
+        at_cap_settings.verified_senders.len(),
+        MAX_VERIFIED_SENDERS,
+        "test setup: verified_senders must be exactly at cap"
+    );
+
+    // This must succeed (at cap, not over).
+    let result = Inbox::update_state(
+        params,
+        initial_state,
+        vec![modify_settings_delta(&owner_sk, at_cap_settings)],
+    );
+    assert!(
+        result.is_ok(),
+        "ModifySettings with verified_senders.len() == MAX_VERIFIED_SENDERS must be accepted; \
+         got {result:?}"
     );
 }
 

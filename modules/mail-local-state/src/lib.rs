@@ -1020,6 +1020,8 @@ mod boundary_tests {
             allow_anon: false,
             bounce_message: String::new(),
             allow_verified_skip_token: true,
+            auto_accept_verified_contacts: false,
+            permission_decisions: HashMap::new(),
         };
         let bytes = serde_json::to_vec(&prefs).expect("serialize");
         let back: IdentityAftPrefs = serde_json::from_slice(&bytes).expect("deserialize");

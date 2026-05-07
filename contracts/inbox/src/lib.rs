@@ -54,6 +54,12 @@ pub struct InboxParams {
 /// the constant.
 pub const DEFAULT_MAX_AGE_SECS: u64 = 365 * 24 * 3600;
 
+/// Maximum number of entries permitted in `InboxSettings.verified_senders`.
+/// ML-DSA-65 VKs are 1952 bytes each; 1024 entries ≈ 2 MiB — large enough
+/// for any realistic contact list but bounded so a spammer cannot inflate
+/// inbox state without limit via `ModifySettings`.
+pub const MAX_VERIFIED_SENDERS: usize = 1024;
+
 impl InboxParams {
     /// Convenience constructor from a typed ML-DSA verifying key.
     pub fn from_verifying_key(vk: &MlDsaVerifyingKey<MlDsa65>) -> Self {
@@ -197,11 +203,50 @@ enum VerificationError {
         expected: Tier,
         got: Tier,
     },
+    /// The ML-DSA-65 detached signature in `Message.signature` does not
+    /// verify against `Message.sender_vk` over `Message.content`. Raised
+    /// on the verified-sender bypass path where the AFT token check is
+    /// skipped but signature authenticity must still be confirmed.
+    SenderSignatureInvalid,
+    /// `ModifySettings` would push `verified_senders.len()` above
+    /// `MAX_VERIFIED_SENDERS`. Rejected to prevent unbounded state growth.
+    TooManyVerifiedSenders,
 }
 
 fn decode_token_generator_vk(encoded: &[u8]) -> Option<MlDsaVerifyingKey<MlDsa65>> {
     let fixed: EncodedVerifyingKey<MlDsa65> = encoded.try_into().ok()?;
     Some(MlDsaVerifyingKey::<MlDsa65>::decode(&fixed))
+}
+
+/// Verify that `message.signature` is a valid ML-DSA-65 detached signature
+/// by `message.sender_vk` over `message.content` (the ciphertext blob).
+///
+/// Called on the verified-sender bypass path to ensure the bypass only grants
+/// a token-free pass to the *actual* owner of the VK, not to an attacker who
+/// copies a verified VK into their `sender_vk` field with no valid signature.
+fn verify_sender_signature(message: &Message) -> Result<(), VerificationError> {
+    // Decode the sender's verifying key.
+    let vk = {
+        let fixed: EncodedVerifyingKey<MlDsa65> = message
+            .sender_vk
+            .as_slice()
+            .try_into()
+            .map_err(|_| VerificationError::SenderSignatureInvalid)?;
+        MlDsaVerifyingKey::<MlDsa65>::decode(&fixed)
+    };
+    // Decode the detached signature.
+    let sig = {
+        let encoded: ml_dsa::EncodedSignature<MlDsa65> = message
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| VerificationError::SenderSignatureInvalid)?;
+        ml_dsa::Signature::<MlDsa65>::decode(&encoded)
+            .ok_or(VerificationError::SenderSignatureInvalid)?
+    };
+    // Verify the signature over the content (ciphertext blob).
+    MlDsaVerifier::verify(&vk, &message.content, &sig)
+        .map_err(|_| VerificationError::SenderSignatureInvalid)
 }
 
 impl From<VerificationError> for ContractError {
@@ -243,6 +288,18 @@ impl Display for VerificationError {
                 write!(
                     f,
                     "Token tier {got:?} does not match recipient policy {expected:?}"
+                )
+            }
+            VerificationError::SenderSignatureInvalid => {
+                write!(
+                    f,
+                    "Sender ML-DSA-65 signature over message content is invalid or missing"
+                )
+            }
+            VerificationError::TooManyVerifiedSenders => {
+                write!(
+                    f,
+                    "verified_senders exceeds the maximum of {MAX_VERIFIED_SENDERS} entries"
                 )
             }
         }
@@ -425,7 +482,14 @@ impl Inbox {
         let bypass_token = self.settings.allow_verified_skip_token
             && !message.sender_vk.is_empty()
             && self.settings.verified_senders.contains(&message.sender_vk);
-        if !bypass_token {
+        if bypass_token {
+            // Security: the bypass only replaces the AFT token gate. We still
+            // require a valid ML-DSA-65 signature by `sender_vk` over the
+            // message content so an attacker who copies a verified VK into
+            // their `sender_vk` field (but cannot sign with the corresponding
+            // key) is rejected.
+            verify_sender_signature(&message)?;
+        } else {
             let verifying_key = decode_token_generator_vk(&message.token_assignment.generator)
                 .ok_or(VerificationError::InvalidTokenGeneratorKey)?;
             message
@@ -560,6 +624,13 @@ fn can_update_settings(
     signature: &Signature,
     settings: &InboxSettings,
 ) -> Result<(), ContractError> {
+    // Enforce the verified_senders size cap before checking the signature so
+    // an oversized payload is rejected cheaply (no key decode needed).
+    if settings.verified_senders.len() > MAX_VERIFIED_SENDERS {
+        return Err(ContractError::Other(format!(
+            "verified_senders exceeds the maximum of {MAX_VERIFIED_SENDERS} entries"
+        )));
+    }
     let serialized =
         serde_json::to_vec(settings).map_err(|e| ContractError::Deser(format!("{e}")))?;
     let verifying_key = params

@@ -516,10 +516,11 @@ test.describe("Live node E2E", () => {
       ).toBeVisible({ timeout: 30_000 });
 
       // ── Round 2: bob → alice (reply path) ────────────────────────
-      // Flaky on iso (~33% miss rate, no failing assertion in
-      // logs — bob's UPDATE doesn't surface in alice's inbox within
-      // the 60s window). Tracked separately; gated until reproducible.
-      if (process.env.FREENET_LIVE_E2E_REPLY === "1") {
+      // #122: was flaky on iso while #174 was open (round-1 path was
+      // also broken; reply assertion couldn't be exercised).
+      // Re-enabled by default in test-e2e-real-node make task; export
+      // FREENET_LIVE_E2E_REPLY=0 to disable for local debug runs.
+      if (process.env.FREENET_LIVE_E2E_REPLY !== "0") {
         // Bob needs to import alice first so the reply can resolve.
         // Scope to alice3 row specifically (#174 — gw delegate accumulates
         // alice1/alice2/alice3 across tests; .first() returns alice1).

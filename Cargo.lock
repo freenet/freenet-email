@@ -87,15 +87,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arc-swap"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -861,17 +852,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "derive_more"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1571,7 +1551,6 @@ dependencies = [
  "chrono",
  "freenet-stdlib",
  "ml-dsa",
- "rand 0.8.5",
  "serde",
  "serde_json",
  "strum",
@@ -1627,11 +1606,9 @@ dependencies = [
  "chrono",
  "freenet-aft-interface",
  "freenet-stdlib",
- "getrandom 0.4.2",
  "ml-dsa",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 1.0.69",
 ]
 
@@ -1688,7 +1665,6 @@ version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c3ac04f50790cc912697afa60d303a9d3efff2a70e5f787192b7cd053ae2fb9"
 dependencies = [
- "arbitrary",
  "bincode",
  "blake3",
  "bs58",
@@ -1711,38 +1687,6 @@ dependencies = [
  "tracing-subscriber",
  "wasm-bindgen",
  "web-sys",
-]
-
-[[package]]
-name = "freenet-token-allocation-record"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "chrono",
- "freenet-aft-interface",
- "freenet-stdlib",
- "ml-dsa",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "freenet-token-generator"
-version = "0.1.0"
-dependencies = [
- "arbitrary",
- "bincode",
- "bs58",
- "chacha20poly1305",
- "chrono",
- "freenet-aft-interface",
- "freenet-stdlib",
- "ml-dsa",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "serde",
- "serde_json",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1890,7 +1834,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.0",
  "wasip2",
  "wasip3",
 ]

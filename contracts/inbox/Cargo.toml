@@ -1,31 +1,49 @@
+# Standalone single-member workspace. Required by fdev's
+# `get_workspace_target_dir()` which panics if it can't find a [workspace]
+# manifest walking upward from the crate. (Same trick used by
+# contracts/facade/Cargo.toml — see issue #198.)
+[workspace]
+
 [package]
 name = "freenet-email-inbox"
 version = "0.0.1"
 edition = "2024"
-license.workspace = true
+license = "LGPL-3.0-or-later"
 publish = false
 
+# Issue #199. EXCLUDED from the freenet-email workspace ([workspace.exclude]
+# in the root Cargo.toml). Has its own Cargo.lock so workspace dep churn
+# (dioxus, ml-kem bumps for the UI side) cannot rotate the inbox
+# contract's wasm bytes. Rotation orphans every user's stored messages;
+# the whole point of #199 Phase A is to make rotation impossible without
+# an explicit edit to the pins below.
+#
+# All deps pinned with `=` so cargo cannot pick a higher
+# semver-compatible release. Bumping any of these MUST be paired with
+# the per-identity migration story (#199 Phase B).
+
 [dependencies]
-chrono = { workspace = true }
-freenet-stdlib = { workspace = true }
-ml-dsa = { workspace = true }
-freenet-aft-interface = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+chrono = { version = "=0.4.44", default-features = false, features = ["alloc", "serde"] }
+freenet-stdlib = "=0.3.5"
+ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+thiserror = "=1.0.69"
+
+freenet-aft-interface = { path = "../../modules/antiflood-tokens/interfaces" }
 
 [dev-dependencies]
 # Re-enable `clock` for integration tests so `Utc::now()` is available.
 # The contract WASM build never sees this — it's a dev-dep override on
-# top of the lib's `default-features = false` workspace `chrono` dep.
-chrono = { workspace = true, features = ["clock"] }
+# top of the lib's `default-features = false` chrono dep.
+chrono = { version = "=0.4.44", features = ["clock"] }
 # ML-DSA keygen needs a `rand_core 0.10`-compatible `CryptoRng`. The
 # easiest source is `getrandom::SysRng` wrapped in `UnwrapErr` to turn
 # the fallible `TryRng` into an infallible `RngCore`. This is also the
 # form ml-dsa's own docs use. `sys_rng` is behind a feature flag.
-getrandom = { version = "0.4", features = ["sys_rng"] }
+getrandom = { version = "=0.4.2", features = ["sys_rng"] }
 # Used by the test-helper module for deterministic 32-byte assignment hashes.
-sha2 = { workspace = true }
+sha2 = { version = "=0.10.9", default-features = false }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -35,3 +53,12 @@ default = ["freenet-main-contract"]
 contract = ["freenet-stdlib/contract"]
 freenet-main-contract = []
 wasmbind = ["chrono/wasmbind"]
+
+# Mirror the freenet-email workspace's wasm release profile so cross-
+# workspace builds produce identical bytes for the same source.
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -2,20 +2,42 @@
 name = "freenet-aft-interface"
 version = "0.1.0"
 edition = "2024"
+license = "LGPL-3.0-or-later"
+publish = false
+
+# Issue #199 / #198. This crate is INTENTIONALLY OUTSIDE the freenet-email
+# workspace ([workspace.exclude] in the root Cargo.toml). Three contract
+# crates (also outside the workspace) path-dep this crate:
+#  - contracts/inbox
+#  - modules/antiflood-tokens/contracts/token-allocation-record
+#  - modules/antiflood-tokens/delegates/token-generator
+# Their wasm bytes must stay byte-stable across releases. Workspace dep
+# churn (chrono, ml-dsa, freenet-stdlib bumps for the UI side) cannot
+# rotate those bytes because cargo resolves the contract builds against
+# the contract-local Cargo.locks, not the workspace lockfile.
+#
+# The freenet-email UI ALSO consumes this crate (via re-export through
+# common/) — the workspace resolves it against the workspace lockfile,
+# which is a separate dep tree. They share source, not lock state.
+#
+# All deps are pinned with `=` so cargo cannot pick a higher
+# semver-compatible release. Bumping any of these rotates contract ids
+# and orphans every user's inbox + AFT token ledger; do not loosen these
+# pins without a paired migration plan (issue #199 Phase B).
 
 [dependencies]
-bincode = { workspace = true }
-bs58 = { workspace = true }
-chrono = { workspace = true }
-freenet-stdlib = { workspace = true }
-ml-dsa = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
+bincode = "=1.3.3"
+bs58 = "=0.5.1"
+chrono = { version = "=0.4.44", default-features = false, features = ["alloc", "serde"] }
+freenet-stdlib = "=0.3.5"
+ml-dsa = { version = "=0.1.0-rc.8", default-features = false, features = ["alloc", "rand_core"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+strum = { version = "=0.24.1", features = ["derive"] }
+thiserror = "=1.0.69"
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-rand = "0.8"
+rand = "=0.8.5"
 
 [features]
 contract = ["freenet-stdlib/contract"]

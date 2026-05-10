@@ -276,8 +276,33 @@ point. Phase 3 (issue #200 sub-task) flips the UI to embed the facade id
 exclusively. Phase 2 (issue #199) handles per-identity inbox + AFT
 contract migration.
 
-**Lockfile isolation (issue #198)**: the facade contract and its shared
-types crate live OUTSIDE the freenet-email workspace:
+**Inbox + AFT lockfile isolation (issue #199 Phase A)**: same pattern
+extended to every other on-chain contract:
+
+- `contracts/inbox/` — the inbox contract.
+- `modules/antiflood-tokens/contracts/token-allocation-record/` — the
+  AFT token-allocation-record contract.
+- `modules/antiflood-tokens/delegates/token-generator/` — the AFT
+  token-generator delegate.
+- `modules/antiflood-tokens/interfaces/` — shared aft-interface types
+  crate (analog of facade-types). Path-dep'd by all three contracts AND
+  by the workspace UI.
+
+All four are listed in `[workspace.exclude]`. Each has its own
+`Cargo.lock` and =x.y.z pins on every dep that influences wasm output
+(chrono, ml-dsa, freenet-stdlib, etc.). Each also has a one-line
+`[workspace]` stanza so `fdev`'s `get_workspace_target_dir()` walk
+doesn't panic.
+
+Net effect: bumping any workspace dep (dioxus, ml-kem) cannot rotate
+inbox.wasm or AFT contract wasms, so users' stored messages and AFT
+token ledgers stay accessible across releases. To deliberately rotate
+(e.g. for a contract bugfix that requires data migration), edit the
+=x.y.z pin in the relevant Cargo.toml and pair the change with the
+per-identity migration story (issue #199 Phase B — not yet shipped).
+
+**Facade lockfile isolation (issue #198)**: the facade contract and its
+shared types crate live OUTSIDE the freenet-email workspace:
 
 - `contracts/facade-types/` — tiny crate with `FacadePointer`,
   `FacadeMetadata`, `signed_payload()`, `FACADE_MAX_PREV_APP_IDS`. Its

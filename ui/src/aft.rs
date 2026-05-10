@@ -530,6 +530,26 @@ impl AftRecords {
         Ok(())
     }
 
+    /// Serialize the cached `TokenAllocationRecord` for `identity` as a
+    /// JSON byte vector suitable for inclusion as
+    /// `UpdateData::RelatedStateAndDelta { state, .. }`. Returns `None`
+    /// if the identity has no record cached locally.
+    ///
+    /// Used by `MessageModel::finish_sending` (#198 follow-up) to bundle
+    /// the sender's AFT record inline with the inbox UPDATE so the
+    /// receiver doesn't need to issue a sub-op GET — works around
+    /// freenet-core#4077 where `fetch_related_via_network` times out
+    /// against AFT contracts that aren't close to the receiver in
+    /// keyspace, pinning the receiver's inbox to its initial empty
+    /// state via `merge_rejected_valid_local`.
+    pub fn record_state_for(identity: &Identity) -> Option<Vec<u8>> {
+        RECORDS.with(|recs| {
+            recs.borrow()
+                .get(identity)
+                .and_then(|rec| rec.clone().serialized().ok())
+        })
+    }
+
     pub fn update_record(identity: Identity, update_data: UpdateData) -> Result<(), DynError> {
         let record = match update_data {
             StateUpdate(state) => {

@@ -365,21 +365,49 @@ impl MessageModel {
         });
 
         if let Some(update) = pending_update {
+            let token_record = assignment.token_record;
             let stored = update.msg.to_stored(assignment, &update.sender)?;
             let delta = UpdateInbox::AddMessages {
                 messages: vec![stored],
             };
             let delta_bytes = serde_json::to_vec(&delta)?;
-            // Send a bare `UpdateData::Delta` and let the runtime resolve
-            // the inbox contract's `update_state` requires(AFT record)
-            // signal via `fetch_related_via_network`. This relies on
-            // freenet-core PR #4006 (validate-side) + PR #4007
-            // (update-side) — without those the receiver's
-            // `update_state` errors with MissingRelated and the broadcast
-            // bounces through ResyncRequest recovery, see #80.
+            // Bundle the sender's AFT record state inline as
+            // `RelatedStateAndDelta`. The inbox contract's
+            // `update_state` reads it from the bundle (see
+            // contracts/inbox/src/lib.rs:738-774, the
+            // `RelatedStateAndDelta` arm) instead of asking the runtime
+            // to fetch it. This works around freenet-core#4077 where
+            // `fetch_related_via_network` times out against AFT
+            // contracts that are far from the receiver in keyspace,
+            // and the receiver's inbox state stays pinned at the
+            // initial empty value via `merge_rejected_valid_local`.
+            //
+            // Falls back to bare `UpdateData::Delta` if the local AFT
+            // record isn't cached (shouldn't happen for the sender at
+            // send time — `assign_token` already required RECORDS hit
+            // — but the fallback keeps us correct against future
+            // refactors of that ordering).
+            let data = match crate::aft::AftRecords::record_state_for(&update.sender) {
+                Some(state_bytes) => UpdateData::RelatedStateAndDelta {
+                    related_to: token_record,
+                    state: state_bytes.into(),
+                    delta: delta_bytes.into(),
+                },
+                None => {
+                    crate::log::error(
+                        format!(
+                            "finish_sending: no AFT record cached for sender `{alias}`; \
+                             falling back to bare Delta — receiver may stall on freenet-core#4077",
+                            alias = update.sender.alias()
+                        ),
+                        None,
+                    );
+                    UpdateData::Delta(delta_bytes.into())
+                }
+            };
             let request = ContractRequest::Update {
                 key: inbox_contract,
-                data: UpdateData::Delta(delta_bytes.into()),
+                data,
             };
             client.send(request.into()).await?;
             // todo: event after sending, we may fail to update, must keep this in mind in case we receive no confirmation

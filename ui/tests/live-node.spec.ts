@@ -171,16 +171,62 @@ test.describe("Live node E2E", () => {
 
       // ── Step 5: regression for #77 (export download blocked) ──────
       // freenet-core#4008 (`allow-downloads` in iframe sandbox) shipped
-      // in v0.2.54.
-      const downloadPromise = page.waitForEvent("download", { timeout: 5_000 });
+      // in v0.2.54. PR #194 then moved the actual download to a
+      // shell-page proxy: the sandboxed app-frame has an opaque origin
+      // and `<a download>` either silently fails (Firefox) or saves
+      // unreachably (Chrome). Inside the iframe the app posts the
+      // payload to the parent shell via `__freenet_shell__: true,
+      // type: "download"`; the gateway shell page does the actual
+      // download from its own origin (handler in freenet-core
+      // path_handlers.rs).
+      //
+      // Asserting `page.waitForEvent("download")` is brittle here —
+      // depends on which frame fires the event under the shell-proxy
+      // path. The contract that PR #194 ships is the postMessage
+      // payload itself, so assert on that instead. Install the listener
+      // on the shell page BEFORE the click so we don't race the post.
+      // Two-step pattern: install captures the next matching message on
+      // `window.__fm_proxy_download__`; await polls for it.
+      await page.evaluate(() => {
+        const w = window as unknown as { __fm_proxy_download__?: unknown };
+        w.__fm_proxy_download__ = undefined;
+        window.addEventListener("message", function handler(ev: MessageEvent) {
+          const data = ev.data as Record<string, unknown> | null;
+          if (!data || typeof data !== "object") return;
+          if (data.__freenet_shell__ !== true || data.type !== "download") return;
+          window.removeEventListener("message", handler);
+          w.__fm_proxy_download__ = {
+            filename: String(data.filename ?? ""),
+            mimeType: String(data.mimeType ?? ""),
+            base64Len: typeof data.base64 === "string" ? data.base64.length : 0,
+          };
+        });
+      });
       await appAfterReload
         .locator(`[data-testid="fm-id-row"][data-alias="${ALIAS_T1_ALICE}"] [data-testid="fm-id-backup"]`)
         .click();
-      const download = await downloadPromise;
+      const proxyMessage = await page.waitForFunction(
+        () => {
+          const w = window as unknown as { __fm_proxy_download__?: unknown };
+          return w.__fm_proxy_download__;
+        },
+        undefined,
+        { timeout: 10_000 },
+      ).then((handle) =>
+        handle.jsonValue() as Promise<{ filename: string; mimeType: string; base64Len: number }>,
+      );
       expect(
-        download.suggestedFilename(),
+        proxyMessage.filename,
         "backup filename matches freenet-identity-<alias>.json (regression for #77)",
       ).toMatch(/freenet-identity-.+\.json/);
+      expect(
+        proxyMessage.mimeType,
+        "backup proxied as application/json",
+      ).toBe("application/json");
+      expect(
+        proxyMessage.base64Len,
+        "backup payload is non-empty base64",
+      ).toBeGreaterThan(0);
     } finally {
       stopPermissionPump();
     }

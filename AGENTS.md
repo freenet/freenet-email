@@ -336,16 +336,28 @@ facade (using the facade-local manifest at `contracts/facade/`) and
 `cargo fmt`, `cargo clippy`, `cargo test`, and a wasm32 release build
 inside `contracts/facade/` so PRs that touch facade are still gated.
 
-**Status (Phase 1)**: the committed snapshot is not yet present —
-`facade.wasm` is platform-specific (a wasm32 release build on macOS
-produces different bytes than the Linux runner the CI workflow uses)
-and `rust-toolchain.toml` only pins `channel = "stable"`, so any rustc
-bump can rotate the bytes. Until both are addressed (rebuild on Linux
-CI with a pinned rustc), the byte-equality CI step runs in
-**informational** mode (it warns on drift but does not fail the PR),
-mirroring the same pre-Phase-5 stance as the web-container snapshot.
-Don't treat the absence of the snapshot as a green light to ignore
-facade rotations — when it lands, this becomes a release blocker.
+**Status (#206 closed)**: the committed snapshot at
+`published-contract/facade.{wasm,parameters,id.txt}` is the canonical
+artifact. It was produced under linux/amd64 with the rustc version
+pinned in `rust-toolchain.toml` (currently 1.95.0). The CI byte-equality
+step in `check-contract-wasm.yml` is now a **release blocker**: any
+rebuild that doesn't match the committed bytes fails the PR.
+
+To regenerate the snapshot deliberately (e.g. after bumping the rustc
+pin or a `=x.y.z` dep pin in `contracts/facade/Cargo.toml`):
+
+```bash
+scripts/build-facade-snapshot-linux.sh   # builds under linux/amd64
+git add published-contract/facade.{wasm,parameters,id.txt}
+git commit -m "chore(facade): regenerate snapshot — <reason>"
+```
+
+On macOS / arm64 the script transparently delegates to a docker
+container running `rust:<pinned>-slim-bookworm` under linux/amd64
+emulation (qemu via OrbStack/Docker Desktop), so the bytes match the
+CI rebuild. On linux/amd64 it builds natively. The local
+`check-facade-byte-equal.sh` skips with a warning on non-canonical
+hosts so dev rebuilds aren't blocked.
 
 ### Reproducibility caveats
 

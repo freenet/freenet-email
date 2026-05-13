@@ -521,9 +521,9 @@ test.describe("Live node E2E", () => {
       await aliceVerify.click();
       await aliceApp.locator('[data-testid="fm-import-submit"]').click();
 
-      // Bob imports alice up-front too — needed for round-2 reply
-      // (FREENET_LIVE_E2E_REPLY). fm-contact-import is on the home
-      // view; once bob opens his inbox, it unmounts.
+      // Bob imports alice up-front too — needed for round-2 reply.
+      // fm-contact-import is on the home view; once bob opens his
+      // inbox, it unmounts.
       await bobApp.locator('[data-testid="fm-contact-import"]').click();
       await bobApp
         .locator('[data-testid="fm-import-contact-modal"] textarea')
@@ -590,18 +590,12 @@ test.describe("Live node E2E", () => {
       ).toBeVisible({ timeout: 30_000 });
 
       // ── Round 2: bob → alice (reply path) ────────────────────────
-      // #122: was flaky on iso while #174 was open (round-1 path was
-      // also broken; reply assertion couldn't be exercised).
-      // Re-enabled by default in test-e2e-real-node make task; export
-      // FREENET_LIVE_E2E_REPLY=0 to disable for local debug runs.
-      if (process.env.FREENET_LIVE_E2E_REPLY !== "0") {
-        // Bob already imported alice at setup; just send the reply.
-        await composeAndSend(bobApp, ALIAS_T3_ALICE, "round two reply", "reply body");
-        await expect(
-          aliceApp.getByText(/round two reply/i),
-          "alice receives bob's reply",
-        ).toBeVisible({ timeout: 60_000 });
-      }
+      // Bob already imported alice at setup; just send the reply.
+      await composeAndSend(bobApp, ALIAS_T3_ALICE, "round two reply", "reply body");
+      await expect(
+        aliceApp.getByText(/round two reply/i),
+        "alice receives bob's reply",
+      ).toBeVisible({ timeout: 60_000 });
 
       // ── Round 3: alice → bob again ──────────────────────────────
       // Skipped on iso by default: AFT day-1 cap is 1 slot, and alice

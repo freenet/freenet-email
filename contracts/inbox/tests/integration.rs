@@ -1449,8 +1449,7 @@ fn modify_settings_to_lower_tier_keeps_existing_higher_tier_messages() {
     let record = make_token_record(assignment);
 
     // Inbox starts with one Min10 message.
-    let state_with_msg =
-        make_inbox_state(&owner_sk, vec![message], Utc::now(), initial_settings);
+    let state_with_msg = make_inbox_state(&owner_sk, vec![message], Utc::now(), initial_settings);
 
     // Owner retunes floor to Min1.
     let new_settings = make_settings_with_policy(Tier::Min1, 365 * 24 * 3600);
@@ -1490,13 +1489,15 @@ fn modify_settings_advances_last_update() {
     let params = make_params(&owner_vk);
 
     let start = Utc::now();
-    let initial_state =
-        make_inbox_state(&owner_sk, vec![], start, InboxSettings::default());
+    let initial_state = make_inbox_state(&owner_sk, vec![], start, InboxSettings::default());
     let new_settings = make_settings_with_policy(Tier::Min1, 7 * 86_400);
     let updates = vec![modify_settings_delta(&owner_sk, new_settings)];
 
     let result = Inbox::update_state(params, initial_state, updates);
-    assert!(result.is_ok(), "ModifySettings must succeed; got {result:?}");
+    assert!(
+        result.is_ok(),
+        "ModifySettings must succeed; got {result:?}"
+    );
     let new_state = result.unwrap().new_state.expect("valid state");
     let decoded = Inbox::try_from(&new_state).expect("decode new state");
     assert!(
@@ -1560,7 +1561,10 @@ fn state_broadcast_with_older_last_update_keeps_local_settings() {
 
     let updates = vec![UpdateData::State(incoming_state)];
     let result = Inbox::update_state(params, local_state, updates);
-    assert!(result.is_ok(), "stale-state merge must succeed; got {result:?}");
+    assert!(
+        result.is_ok(),
+        "stale-state merge must succeed; got {result:?}"
+    );
     let merged = result.unwrap().new_state.expect("valid state");
     let decoded = Inbox::try_from(&merged).expect("decode merged state");
     assert_eq!(

@@ -63,11 +63,12 @@ test.describe("Production liveness", () => {
     // iframe content via frameLocator, not the top-level page.
     const app = page.frameLocator("iframe#app");
 
-    // The APP_NAME heading is part of the LoginHeader component and
-    // is the first user-visible proof that the WASM loaded and the
-    // app's root component mounted successfully.
-    const heading = app.locator("h1");
-    await expect(heading).toContainText(APP_NAME, { timeout: 60_000 });
+    // The `.brand-name` chip in LoginHeader carries APP_NAME and is
+    // the first user-visible proof that WASM loaded and the app's
+    // root component mounted successfully. (The h1 was repurposed to
+    // "Your identities" in the #57 login redesign.)
+    const brand = app.locator(".brand-name").first();
+    await expect(brand).toContainText(APP_NAME, { timeout: 60_000 });
 
     // The "Create new identity" link is rendered by `CreateLinks` when
     // the user has no identified state, which is the initial state on
@@ -76,18 +77,20 @@ test.describe("Production liveness", () => {
       timeout: 10_000,
     });
 
-    // Bulma's `.title` class sets `font-weight: 600` while the user-agent
-    // default for h1 is `bold` (700). The value flips iff the vendored
-    // stylesheet failed to load (CSP block, missing file, path regression).
-    const fontWeight = await heading.evaluate(
-      (el) => getComputedStyle(el).fontWeight,
+    // The login h1 uses the `display lg italic` family from
+    // vendor/css/typography.css (Fraunces italic, weight 400).
+    // A different weight means the vendored stylesheet failed to
+    // load (CSP block, missing file, path regression).
+    const heading = app.locator("h1.display").first();
+    await expect(heading).toContainText("Your identities");
+    const fontStyle = await heading.evaluate(
+      (el) => getComputedStyle(el).fontStyle,
     );
     expect(
-      fontWeight,
-      "Bulma's .title sets font-weight: 600. A different value " +
-        "almost certainly means vendor/css/bulma.min.css did not load " +
-        "(CSP block, missing asset, or path regression).",
-    ).toBe("600");
+      fontStyle,
+      "login h1 uses `display lg italic`. fontStyle != 'italic' means " +
+        "vendor/css/typography.css did not load (CSP/asset regression).",
+    ).toBe("italic");
 
     // Fail on any console error. CSP-blocked assets and WASM errors
     // both surface here, so this is the cheapest catch-all for the

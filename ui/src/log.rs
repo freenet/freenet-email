@@ -42,6 +42,21 @@ pub(crate) fn __debug_internal(msg: impl AsRef<str>) {
     let _ = msg;
 }
 
+/// Log an async local-state write failure AND surface it to the user via an
+/// error toast. The optimistic in-memory write made the UI look correct;
+/// without this surfacing the persistent write failure is silent and the row
+/// silently un-mutates on the next reload (#231, #232).
+///
+/// `op` is the user-facing verb ("save draft", "delete draft", "mark read",
+/// "archive", "save sent", "update delivery state"). The toast reads
+/// "Couldn't <op> — changes may not persist after reload."
+pub(crate) fn local_state_failure(op: &str, err: impl std::fmt::Display) {
+    let detail = format!("{op} failed: {err}");
+    error(detail, None);
+    let user_msg = format!("Couldn't {op} — changes may not persist after reload.");
+    crate::toast::push_toast(user_msg, crate::toast::ToastLevel::Error);
+}
+
 pub(crate) fn error(msg: impl AsRef<str>, action: Option<TryNodeAction>) {
     let error = msg.as_ref();
     if let Some(action) = action {

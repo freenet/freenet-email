@@ -1915,7 +1915,20 @@ pub(super) fn ImportContactForm() -> Element {
         }
     };
 
-    let can_import = fingerprint_words.read().is_some() && !local_alias.read().is_empty();
+    // If the pasted blob includes the `verify: <six-words>` prefix the
+    // sharing flow emits (see share_text format at login.rs:1038), require
+    // the user to tick the verify checkbox before allowing Import. Falling
+    // through to a permanently-unverified contact silently breaks the
+    // verified-only acceptance flow (#228, settings.rs:1434).
+    let has_verify_phrase = paste_text
+        .read()
+        .lines()
+        .next()
+        .map(|l| l.trim_start().starts_with("verify: "))
+        .unwrap_or(false);
+    let can_import = fingerprint_words.read().is_some()
+        && !local_alias.read().is_empty()
+        && (!has_verify_phrase || *verified.read());
 
     let cancel = move |_| {
         import_contact_form.write().0 = false;
@@ -2008,6 +2021,12 @@ pub(super) fn ImportContactForm() -> Element {
                                 }
                                 span { class: "verify-sub",
                                     "Phone, in person, Signal — anything but this app. Untick if you have not."
+                                }
+                                if has_verify_phrase && !*verified.read() {
+                                    span { class: "verify-sub",
+                                        style: "color:#991b1b;",
+                                        "Required: this contact card includes a verify phrase. Tick once you've matched the six words out-of-band."
+                                    }
                                 }
                             }
                         }
@@ -2229,9 +2248,23 @@ fn ContactsSection() -> Element {
                                         "✓ verified"
                                     }
                                 } else {
-                                    span { class: "badge badge-warn",
-                                        "data-testid": "contact-verify-badge",
-                                        "⚠ unverified"
+                                    {
+                                        // Badge is itself the verify CTA so the
+                                        // "⚠ unverified" affordance isn't passive
+                                        // (#228 option B).
+                                        let pending_badge = contact.clone();
+                                        rsx! {
+                                            button {
+                                                class: "badge badge-warn btn-link",
+                                                style: "cursor:pointer; border:0; background:transparent; padding:0; font:inherit;",
+                                                title: "Verify this contact's fingerprint",
+                                                "data-testid": "contact-verify-badge",
+                                                onclick: move |_| {
+                                                    verify_pending.write().0 = Some(pending_badge.clone());
+                                                },
+                                                "⚠ unverified"
+                                            }
+                                        }
                                     }
                                 }
                                 if !verified {

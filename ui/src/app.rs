@@ -1446,10 +1446,9 @@ fn MessageList() -> Element {
                 // Legacy entries (pre-#229) lack sent_at and fall back to
                 // kept_at — wrong but indistinguishable from the old
                 // behaviour, and self-heals next time the row is read.
-                let time = chrono::DateTime::from_timestamp_millis(
-                    kept.sent_at.unwrap_or(kept.kept_at),
-                )
-                .unwrap_or_else(chrono::Utc::now);
+                let time =
+                    chrono::DateTime::from_timestamp_millis(kept.sent_at.unwrap_or(kept.kept_at))
+                        .unwrap_or_else(chrono::Utc::now);
                 emails.push(Message {
                     id: mid,
                     from: kept.from.into(),
